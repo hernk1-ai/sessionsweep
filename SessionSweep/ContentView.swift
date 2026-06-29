@@ -1,6 +1,6 @@
 import SwiftUI
 import AppKit
-import Observation
+import Combine
 
 extension Category {
     var color: Color {
@@ -19,20 +19,55 @@ extension Category {
     }
 }
 
+extension AudioSystemDataCategory {
+    var color: Color {
+        switch self {
+        case .plugins: return .indigo
+        case .presets: return .blue
+        case .impulseResponses: return .mint
+        case .pluginContent: return .teal
+        case .cachesDownloads: return .orange
+        }
+    }
+}
+
+extension AudioSystemDataSafetyStatus {
+    var color: Color {
+        switch self {
+        case .essential: return .secondary
+        case .review: return .yellow
+        case .likelyCache: return .orange
+        case .unknown: return .gray
+        }
+    }
+
+    var explanatoryCopy: String {
+        switch self {
+        case .essential:
+            return "Required for installed audio software. Deleting these files may cause plugins or applications to stop working."
+        case .review:
+            return "Review before making changes."
+        case .likelyCache:
+            return "Temporary or regenerable files. Review before deleting."
+        case .unknown:
+            return "SessionSweep couldn't confidently identify this folder. Review manually before making changes."
+        }
+    }
+}
+
 @MainActor
-@Observable
-final class ScanController {
-    var isScanning = false
-    var phase: ScanPhase = .scanning
-    var liveCount = 0
-    var liveBytes: Int64 = 0
-    var liveItems = 0
-    var liveLabel = ""
-    var dupChecked = 0
-    var dupTotal = 0
-    var result: ScanResult?
-    var scannedPath = ""
-    var currentPath = ""
+final class ScanController: ObservableObject {
+    @Published var isScanning = false
+    @Published var phase: ScanPhase = .scanning
+    @Published var liveCount = 0
+    @Published var liveBytes: Int64 = 0
+    @Published var liveItems = 0
+    @Published var liveLabel = ""
+    @Published var dupChecked = 0
+    @Published var dupTotal = 0
+    @Published var result: ScanResult?
+    @Published var scannedPath = ""
+    @Published var currentPath = ""
     private var cancelToken: CancelToken?
 
     func cancel() { cancelToken?.cancel() }
@@ -84,7 +119,11 @@ final class ScanController {
 }
 
 struct ContentView: View {
-    @State private var controller = ScanController()
+    @StateObject private var controller = ScanController()
+    @State private var selectedDuplicatePaths: Set<String> = []
+    @State private var stagedFiles: [StagedFile] = []
+    @State private var appAlert: AppAlert?
+    @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -98,6 +137,20 @@ struct ContentView: View {
         }
         .padding(28)
         .frame(minWidth: 780, minHeight: 660)
+        .task {
+            refreshStaging()
+        }
+        .onChange(of: controller.result?.rootPath) { _ in
+            resetDuplicateSelection()
+            refreshStaging()
+        }
+        .alert(item: $appAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
     }
 
     private var header: some View {
@@ -244,7 +297,9 @@ struct ContentView: View {
                 }
 
                 card { categorySection(r) }
+                card { audioSystemDataSection(r) }
                 card { duplicatesSection(r) }
+                card { stagingSection() }
                 card { browserSection() }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -321,8 +376,137 @@ struct ContentView: View {
         }
     }
 
+    private func audioSystemDataSection(_ r: ScanResult) -> some View {
+        let audio = r.audioSystemData
+        let categories = AudioSystemDataCategory.allCases
+            .map { ($0, audio.categoryTotals[$0] ?? 0) }
+        let rows = audio.items.prefix(12)
+
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Audio System Data").font(.headline)
+                    Text("Music production files macOS may label as System Data.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text(human(audio.totalSize))
+                    .font(.title3.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(audio.totalSize > 0 ? .primary : .secondary)
+            }
+
+            Text("SessionSweep found audio production files that can contribute to macOS \"System Data.\" These are typically part of your studio setup rather than hidden junk files.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if r.unreadableCount > 0 {
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(
+                        "Some system folders couldn't be analyzed because macOS restricted access.",
+                        systemImage: "lock"
+                    )
+                    Text("Granting Full Disk Access allows SessionSweep to provide a more complete storage analysis. Your files are never modified during scanning.")
+                        .padding(.leading, 18)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if audio.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("No significant audio-related System Data was detected.")
+                        .font(.callout)
+                    Text("Your music production files are either stored elsewhere or are using minimal space.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(categories, id: \.0) { category, size in
+                        audioBreakdownRow(category, size: size, total: max(audio.totalSize, 1))
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Top folders").font(.subheadline.weight(.semibold))
+                    ForEach(audio.topFolders) { audioSystemDataRow($0) }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Detected audio folders").font(.subheadline.weight(.semibold))
+                    ForEach(Array(rows)) { audioSystemDataRow($0) }
+                    if audio.items.count > rows.count {
+                        Text("+ \(audio.items.count - rows.count) more audio folders")
+                            .font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+
+                Text("These files are usually part of your music production environment—plugins, presets, impulse responses, and application support files. SessionSweep is showing them so you understand where storage is being used, not because they are automatically safe to delete.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func audioBreakdownRow(
+        _ category: AudioSystemDataCategory,
+        size: Int64,
+        total: Int64
+    ) -> some View {
+        HStack(spacing: 8) {
+            Circle().fill(category.color).frame(width: 9, height: 9)
+            Text(category.rawValue)
+            Spacer()
+            Text(human(size))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(size > 0 ? .secondary : .tertiary)
+            Text("\(Int((Double(size) / Double(total) * 100).rounded()))%")
+                .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                .frame(width: 40, alignment: .trailing)
+        }
+    }
+
+    private func audioSystemDataRow(_ item: AudioSystemDataItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Circle().fill(item.category.color).frame(width: 8, height: 8)
+                Text(item.friendlyName)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(item.safetyStatus.rawValue)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(item.safetyStatus.color)
+                    .help(item.safetyStatus.explanatoryCopy)
+                    .accessibilityLabel(item.safetyStatus.explanatoryCopy)
+                Text(human(item.size))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 88, alignment: .trailing)
+            }
+            HStack(spacing: 6) {
+                Text(item.category.rawValue)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(item.category.color)
+                Text(item.path)
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+
     private func duplicatesSection(_ r: ScanResult) -> some View {
-        VStack(alignment: .leading, spacing: 22) {
+        let selectedBytes = selectedDuplicateBytes(in: r)
+        return VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Duplicate files").font(.headline)
@@ -336,14 +520,26 @@ struct ContentView: View {
                     Text("No confident duplicates over 1 MB (same name and identical content).")
                         .font(.callout).foregroundStyle(.secondary)
                 } else {
-                    Text("Same filename and byte-for-byte identical. Review only — nothing is selected or deleted. Some identical copies are still needed (a plugin may require its own), so check each before acting.")
+                    Text("Same filename and byte-for-byte identical. SessionSweep preselects likely redundant copies, but you can change any checkbox before moving files.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    ForEach(r.duplicateGroups.prefix(15)) { confidentRow($0) }
-                    if r.duplicateGroups.count > 15 {
-                        Text("+ \(r.duplicateGroups.count - 15) more groups")
-                            .font(.caption).foregroundStyle(.tertiary)
+
+                    if !selectedDuplicatePaths.isEmpty {
+                        HStack(spacing: 10) {
+                            Button { moveSelectedToStaging() } label: {
+                                Label("Move to Staging", systemImage: "tray.and.arrow.down")
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Text("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected · \(human(selectedBytes))")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(.vertical, 2)
                     }
+
+                    ForEach(r.duplicateGroups) { confidentRow($0) }
                 }
             }
 
@@ -366,7 +562,8 @@ struct ContentView: View {
     }
 
     private func confidentRow(_ g: DuplicateGroup) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let keeper = recommendedKeeper(in: g)
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.on.doc.fill").foregroundStyle(.teal).font(.caption)
                 Text(g.displayName).fontWeight(.medium)
@@ -377,11 +574,109 @@ struct ContentView: View {
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
             ForEach(g.paths, id: \.self) { path in
-                Text(path).font(.caption2).foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.middle)
+                duplicatePathRow(path, fileSize: g.fileSize, keeper: keeper)
             }
         }
         .padding(.vertical, 4)
+    }
+
+    private func duplicatePathRow(_ path: String, fileSize: Int64, keeper: String?) -> some View {
+        let isKeeper = path == keeper
+        let isSelected = selectedDuplicatePaths.contains(path)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { selectedDuplicatePaths.contains(path) },
+                set: { checked in
+                    if checked {
+                        selectedDuplicatePaths.insert(path)
+                    } else {
+                        selectedDuplicatePaths.remove(path)
+                    }
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(path)
+                    .font(.caption2)
+                    .foregroundStyle(isSelected ? .primary : .tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(isKeeper ? "Recommended keep" : "Recommended staging")
+                    .font(.caption2)
+                    .foregroundStyle(isKeeper ? Color.secondary : Color.teal)
+            }
+            Spacer()
+            Text(human(fileSize))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func stagingSection() -> some View {
+        let total = stagedFiles.reduce(Int64(0)) { $0 + $1.size }
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Staging").font(.headline)
+                    Text("Files moved out of duplicate locations, mirrored by original path.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if total > 0 {
+                    Text(human(total))
+                        .font(.title3.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.teal)
+                }
+            }
+
+            if stagedFiles.isEmpty {
+                Text("No files are currently in SessionSweep Staging.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Text("\(stagedFiles.count) file\(stagedFiles.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button(role: .destructive) { clearStaging() } label: {
+                        Label("Clear Staging", systemImage: "trash")
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(stagedFiles) { stagedFileRow($0) }
+                }
+            }
+        }
+    }
+
+    private func stagedFileRow(_ file: StagedFile) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(file.displayName)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(file.originalPath)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Text(human(file.size))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .trailing)
+            Button { restore(file) } label: {
+                Label("Restore", systemImage: "arrow.uturn.backward")
+            }
+        }
+        .padding(.vertical, 3)
     }
 
     private func identicalRow(_ g: DuplicateGroup) -> some View {
@@ -549,6 +844,140 @@ struct ContentView: View {
         }
     }
 
+    private func resetDuplicateSelection() {
+        guard let result = controller.result else {
+            selectedDuplicatePaths = []
+            return
+        }
+        selectedDuplicatePaths = Set(result.duplicateGroups.flatMap { group in
+            guard let keeper = recommendedKeeper(in: group) else { return [String]() }
+            return group.paths.filter { $0 != keeper }
+        })
+    }
+
+    private func selectedDuplicateBytes(in result: ScanResult) -> Int64 {
+        result.duplicateGroups.reduce(Int64(0)) { total, group in
+            total + Int64(group.paths.filter { selectedDuplicatePaths.contains($0) }.count) * group.fileSize
+        }
+    }
+
+    private func recommendedKeeper(in group: DuplicateGroup) -> String? {
+        group.paths.max { lhs, rhs in
+            isBetterKeeper(rhs, than: lhs)
+        }
+    }
+
+    private func isBetterKeeper(_ lhs: String, than rhs: String) -> Bool {
+        let lhsScore = locationScore(for: lhs)
+        let rhsScore = locationScore(for: rhs)
+        if lhsScore != rhsScore { return lhsScore > rhsScore }
+
+        let lhsModified = modificationDate(for: lhs)
+        let rhsModified = modificationDate(for: rhs)
+        if lhsModified != rhsModified { return lhsModified > rhsModified }
+
+        let lhsDepth = lhs.split(separator: "/").count
+        let rhsDepth = rhs.split(separator: "/").count
+        if lhsDepth != rhsDepth { return lhsDepth < rhsDepth }
+
+        return lhs.localizedStandardCompare(rhs) == .orderedAscending
+    }
+
+    private func locationScore(for path: String) -> Int {
+        let lower = path.lowercased()
+        var score = 10
+        if lower.contains("/music/") || lower.contains("/documents/") ||
+            lower.contains("/projects/") || lower.contains("/sessions/") {
+            score += 8
+        }
+        if lower.contains("/downloads/") || lower.contains("/desktop/") ||
+            lower.contains("/trash/") || lower.contains("/caches/") ||
+            lower.contains("/tmp/") || lower.contains("/temp/") ||
+            lower.contains("backup") || lower.contains(" copy") {
+            score -= 8
+        }
+        return score
+    }
+
+    private func modificationDate(for path: String) -> TimeInterval {
+        let url = URL(fileURLWithPath: path)
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+    }
+
+    private func moveSelectedToStaging() {
+        guard hasValidLicense else {
+            appAlert = AppAlert(
+                title: "License Required",
+                message: "Moving duplicate files to SessionSweep Staging is a paid feature. Activate a valid license to use Move to Staging."
+            )
+            return
+        }
+
+        let paths = selectedDuplicatePaths.sorted()
+        var movedOriginalPaths: Set<String> = []
+        var failures: [String] = []
+
+        for path in paths {
+            do {
+                let staged = try StagingManager.moveToStaging(originalPath: path)
+                movedOriginalPaths.insert(staged.originalPath)
+            } catch {
+                failures.append(error.localizedDescription)
+            }
+        }
+
+        if !movedOriginalPaths.isEmpty {
+            applyMovedDuplicatePaths(movedOriginalPaths)
+            selectedDuplicatePaths.subtract(movedOriginalPaths)
+            refreshStaging()
+        }
+
+        if !failures.isEmpty {
+            appAlert = AppAlert(
+                title: "Some Files Could Not Be Moved",
+                message: failures.prefix(4).joined(separator: "\n")
+            )
+        }
+    }
+
+    private func applyMovedDuplicatePaths(_ movedPaths: Set<String>) {
+        guard var result = controller.result else { return }
+        result.duplicateGroups = result.duplicateGroups.compactMap { group in
+            let remaining = group.paths.filter { !movedPaths.contains($0) }
+            guard remaining.count >= 2 else { return nil }
+            return DuplicateGroup(fileSize: group.fileSize, paths: remaining, sameName: group.sameName)
+        }
+        result.duplicateReclaimable = result.duplicateGroups.reduce(0) { $0 + $1.reclaimable }
+        controller.result = result
+    }
+
+    private func refreshStaging() {
+        do {
+            stagedFiles = try StagingManager.stagedFiles()
+        } catch {
+            appAlert = AppAlert(title: "Could Not Read Staging", message: error.localizedDescription)
+        }
+    }
+
+    private func restore(_ file: StagedFile) {
+        do {
+            try StagingManager.restore(file)
+            refreshStaging()
+        } catch {
+            appAlert = AppAlert(title: "Could Not Restore File", message: error.localizedDescription)
+        }
+    }
+
+    private func clearStaging() {
+        do {
+            try StagingManager.clearStaging()
+            refreshStaging()
+        } catch {
+            appAlert = AppAlert(title: "Could Not Clear Staging", message: error.localizedDescription)
+        }
+    }
+
     private var headlineLocation: String {
         let u = URL(fileURLWithPath: controller.scannedPath)
         let n = u.lastPathComponent
@@ -570,5 +999,10 @@ struct ContentView: View {
     }
 }
 
-#Preview { ContentView() }
+private struct AppAlert: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
 
+#Preview { ContentView() }

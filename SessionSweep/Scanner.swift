@@ -122,6 +122,7 @@ struct ScanResult: Sendable {
     var categoryTotals: [Category: Int64] = [:]
     var folderSizes: [String: Int64] = [:]
     var folderChildren: [String: [String]] = [:]
+    var audioSystemData: AudioSystemDataSummary = AudioSystemDataSummary()
     var duplicateGroups: [DuplicateGroup] = []
     var identicalContentGroups: [DuplicateGroup] = []
     var duplicateReclaimable: Int64 = 0
@@ -271,6 +272,7 @@ enum Scanner {
         result.unreadableCount = unreadable
         result.folderSizes = folderSizes
         result.folderChildren = children
+        result.audioSystemData = AudioSystemDataClassifier.summarize(folderSizes: folderSizes)
 
         if cancel?.isCancelled != true {
             let (confident, identical) = findDuplicates(
