@@ -906,13 +906,13 @@ struct ContentView: View {
     }
 
     private func moveSelectedToStaging() {
-        guard hasValidLicense else {
-            appAlert = AppAlert(
-                title: "License Required",
-                message: "Moving duplicate files to SessionSweep Staging is a paid feature. Activate a valid license to use Move to Staging."
-            )
-            return
-        }
+//        guard hasValidLicense else {
+//            appAlert = AppAlert(
+//                title: "License Required",
+//                message: "Moving duplicate files to SessionSweep Staging is a paid feature. Activate a valid license to use Move to Staging."
+//            )
+//            return
+//        }
 
         let paths = selectedDuplicatePaths.sorted()
         var movedOriginalPaths: Set<String> = []
