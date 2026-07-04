@@ -111,7 +111,7 @@ enum StagingManager {
     static func clearStaging() throws {
         let root = stagingFolderURL
         guard FileManager.default.fileExists(atPath: root.path) else { return }
-        try FileManager.default.removeItem(at: root)
+        try FileManager.default.trashItem(at: root, resultingItemURL: nil)
     }
 
     private static func ensureStagingFolder() throws {
