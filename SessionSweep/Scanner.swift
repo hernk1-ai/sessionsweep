@@ -133,6 +133,7 @@ struct ScanResult: Sendable {
 enum Scanner {
     static let minDupSize: Int64 = 1_048_576
     static let browserMinSize: Int64 = 1_048_576
+    private nonisolated static let topFilesLimit = 100
 
     private static let bundleLikeExts: Set<String> = [
         "swiftmodule","framework","bundle","app","component","vst","vst3",
@@ -202,6 +203,7 @@ enum Scanner {
 
         var folderSizes: [String: Int64] = [:]
         var sizeBuckets: [Int64: [String]] = [:]
+        var seenDuplicateTargets: Set<String> = []
         let rootPath = root.standardizedFileURL.path
         result.rootPath = rootPath
 
@@ -256,7 +258,7 @@ enum Scanner {
                     result.fileCount += 1
                     result.categoryTotals[cat, default: 0] += size
                     insertTop(&result.topFiles,
-                              item: SizedItem(url: url, size: size, category: cat), limit: 20)
+                              item: SizedItem(url: url, size: size, category: cat), limit: topFilesLimit)
                     addToAncestors(of: url, size)
                     enumerator.skipDescendants()
                 }
@@ -271,15 +273,18 @@ enum Scanner {
             result.fileCount += 1
             result.categoryTotals[cat, default: 0] += size
             let sizedItem = SizedItem(url: url, size: size, category: cat)
-            insertTop(&result.topFiles, item: sizedItem, limit: 20)
+            insertTop(&result.topFiles, item: sizedItem, limit: topFilesLimit)
             if cat == .installers {
                 result.installerFiles.append(sizedItem)
             }
             addToAncestors(of: url, size)
 
             let logical = Int64(v.fileSize ?? 0)
-            if logical >= minDupSize && !ProtectedVendorResourceClassifier.isProtected(path: url.path) {
-                sizeBuckets[logical, default: []].append(url.path)
+            if logical >= minDupSize,
+               let duplicatePath = duplicateCandidatePath(for: url, seenTargets: &seenDuplicateTargets),
+               !DuplicateSafetyClassifier.isNeverRecommend(path: url.path),
+               !DuplicateSafetyClassifier.isNeverRecommend(path: duplicatePath) {
+                sizeBuckets[logical, default: []].append(duplicatePath)
             }
         }
 
@@ -300,8 +305,8 @@ enum Scanner {
         if cancel?.isCancelled != true {
             let (confident, identical) = findDuplicates(
                 sizeBuckets: sizeBuckets, cancel: cancel, progress: progress)
-            let actionableConfident = filterProtectedDuplicateResources(confident)
-            let actionableIdentical = filterProtectedDuplicateResources(identical)
+            let actionableConfident = filterNeverRecommendDuplicates(confident)
+            let actionableIdentical = filterNeverRecommendDuplicates(identical)
             result.duplicateGroups = actionableConfident
             result.identicalContentGroups = actionableIdentical
             result.duplicateReclaimable = actionableConfident.reduce(0) { $0 + $1.reclaimable }
@@ -376,12 +381,12 @@ enum Scanner {
         return (confident, identical)
     }
 
-    private static nonisolated func filterProtectedDuplicateResources(
+    private static nonisolated func filterNeverRecommendDuplicates(
         _ groups: [DuplicateGroup]
     ) -> [DuplicateGroup] {
         groups.compactMap { group in
             let actionablePaths = group.paths.filter {
-                !ProtectedVendorResourceClassifier.isProtected(path: $0)
+                !DuplicateSafetyClassifier.isNeverRecommend(path: $0)
             }
             guard actionablePaths.count >= 2 else { return nil }
             return DuplicateGroup(
@@ -390,6 +395,15 @@ enum Scanner {
                 sameName: group.sameName)
         }
         .sorted { $0.reclaimable > $1.reclaimable }
+    }
+
+    private static nonisolated func duplicateCandidatePath(
+        for url: URL,
+        seenTargets: inout Set<String>
+    ) -> String? {
+        let resolvedPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+        guard seenTargets.insert(resolvedPath).inserted else { return nil }
+        return resolvedPath
     }
 
     private static func partialHash(path: String, fileSize: Int64, sample: Int = 65536) -> String? {

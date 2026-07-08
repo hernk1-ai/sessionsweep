@@ -35,8 +35,16 @@ enum StagingManager {
             .appendingPathComponent("SessionSweep Staging", isDirectory: true)
     }
 
+    static func duplicateSafetyClassification(originalPath: String) -> DuplicateSafetyClassification {
+        DuplicateSafetyClassifier.classify(path: originalPath)
+    }
+
+    static func isNeverRecommendDuplicate(originalPath: String) -> Bool {
+        duplicateSafetyClassification(originalPath: originalPath).isNeverRecommend
+    }
+
     static func isProtectedVendorResource(originalPath: String) -> Bool {
-        ProtectedVendorResourceClassifier.isProtected(path: originalPath)
+        isNeverRecommendDuplicate(originalPath: originalPath)
     }
 
     static func stagedFiles() throws -> [StagedFile] {

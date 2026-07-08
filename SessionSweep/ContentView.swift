@@ -124,6 +124,7 @@ struct ContentView: View {
     @State private var selectedInstallerPaths: Set<String> = []
     @State private var stagedFiles: [StagedFile] = []
     @State private var appAlert: AppAlert?
+    @State private var showOtherLargeApplications = false
     @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
 
     var body: some View {
@@ -305,10 +306,7 @@ struct ContentView: View {
                 card { stagingSection() }
                 card { browserSection() }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Largest files").font(.headline)
-                    ForEach(r.topFiles.prefix(12)) { fileRow($0) }
-                }
+                largestAudioAssetsSection(r)
 
                 Text("Scanned in \(String(format: "%.1f", r.elapsed))s · "
                      + "\(r.fileCount.formatted()) items · \(r.unreadableCount) unreadable · "
@@ -507,6 +505,52 @@ struct ContentView: View {
         .padding(.vertical, 3)
     }
 
+    private func largestAudioAssetsSection(_ r: ScanResult) -> some View {
+        let audioAssets = largestAudioAssets(in: r)
+        let otherLargeApplications = otherLargeApplications(in: r)
+
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Largest Audio Assets").font(.headline)
+                Text("The largest audio applications, libraries, sample content, and production assets on your Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if audioAssets.isEmpty {
+                Text("No large audio-focused assets were found in the top scan results.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(audioAssets.prefix(12)) { fileRow($0) }
+            }
+
+            if !otherLargeApplications.isEmpty {
+                DisclosureGroup(isExpanded: $showOtherLargeApplications) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Very large non-audio apps are shown here for context, but they are not part of your primary music-production storage picture.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(otherLargeApplications.prefix(8)) { fileRow($0) }
+                    }
+                    .padding(.top, 6)
+                } label: {
+                    HStack {
+                        Text("Other Large Applications")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Text("\(otherLargeApplications.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+
     private func duplicatesSection(_ r: ScanResult) -> some View {
         let selectedBytes = selectedDuplicateBytes(in: r)
         return VStack(alignment: .leading, spacing: 22) {
@@ -593,13 +637,14 @@ struct ContentView: View {
 
     private func duplicatePathRow(_ path: String, fileSize: Int64, keeper: String?) -> some View {
         let isKeeper = path == keeper
-        let isProtected = StagingManager.isProtectedVendorResource(originalPath: path)
-        let isSelected = selectedDuplicatePaths.contains(path) && !isProtected
+        let safetyClassification = DuplicateSafetyClassifier.classify(path: path)
+        let isNeverRecommend = safetyClassification.isNeverRecommend
+        let isSelected = selectedDuplicatePaths.contains(path) && !isNeverRecommend
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) && !isProtected },
+                get: { selectedDuplicatePaths.contains(path) && !isNeverRecommend },
                 set: { checked in
-                    if checked && !isProtected {
+                    if checked && !isNeverRecommend {
                         selectedDuplicatePaths.insert(path)
                     } else {
                         selectedDuplicatePaths.remove(path)
@@ -608,7 +653,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(isProtected)
+            .disabled(isNeverRecommend)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(path)
@@ -616,10 +661,10 @@ struct ContentView: View {
                     .foregroundStyle(isSelected ? .primary : .tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(duplicateRecommendationLabel(isKeeper: isKeeper, isProtected: isProtected))
+                Text(duplicateRecommendationLabel(isKeeper: isKeeper, safetyClassification: safetyClassification))
                     .font(.caption2)
-                    .foregroundStyle((isKeeper || isProtected) ? Color.secondary : Color.teal)
-                    .help(duplicateRecommendationDescription(isKeeper: isKeeper, isProtected: isProtected))
+                    .foregroundStyle((isKeeper || isNeverRecommend) ? Color.secondary : Color.teal)
+                    .help(duplicateRecommendationDescription(isKeeper: isKeeper, safetyClassification: safetyClassification))
             }
             Spacer()
             Text(human(fileSize))
@@ -964,6 +1009,141 @@ struct ContentView: View {
         }
     }
 
+    private func largestAudioAssets(in result: ScanResult) -> [SizedItem] {
+        result.topFiles
+            .filter(isAudioAsset)
+            .sorted { lhs, rhs in
+                if lhs.size != rhs.size { return lhs.size > rhs.size }
+                let lhsScore = audioAssetPriority(lhs)
+                let rhsScore = audioAssetPriority(rhs)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                return lhs.displayName < rhs.displayName
+            }
+    }
+
+    private func otherLargeApplications(in result: ScanResult) -> [SizedItem] {
+        result.topFiles
+            .filter { item in
+                item.category == .applications
+                    && !isAudioAsset(item)
+                    && item.size >= 20 * 1_024 * 1_024 * 1_024
+            }
+            .sorted { $0.size > $1.size }
+    }
+
+    private func isAudioAsset(_ item: SizedItem) -> Bool {
+        guard let category = item.category else { return isAudioRelatedPath(item.url.path) }
+        switch category {
+        case .projects, .plugins, .pluginData, .sampleLibraries, .audioFiles:
+            return true
+        case .applications:
+            return isAudioApplication(item)
+        case .installers, .archives:
+            return isAudioRelatedPath(item.url.path)
+        case .media, .other:
+            return isAudioRelatedPath(item.url.path)
+        }
+    }
+
+    private func audioAssetPriority(_ item: SizedItem) -> Int {
+        switch item.category {
+        case .projects: return 90
+        case .sampleLibraries: return 85
+        case .pluginData: return 80
+        case .plugins: return 75
+        case .audioFiles: return 70
+        case .applications: return isAudioApplication(item) ? 65 : 0
+        case .installers: return isAudioRelatedPath(item.url.path) ? 60 : 0
+        case .archives: return isAudioRelatedPath(item.url.path) ? 55 : 0
+        case .media, .other, nil: return isAudioRelatedPath(item.url.path) ? 50 : 0
+        }
+    }
+
+    private func isAudioApplication(_ item: SizedItem) -> Bool {
+        guard item.category == .applications else { return false }
+        return audioApplicationMarkers.contains { marker in
+            item.displayName.lowercased().contains(marker)
+        }
+    }
+
+    private func isAudioRelatedPath(_ path: String) -> Bool {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let lowerPath = normalized.lowercased()
+        let parent = URL(fileURLWithPath: normalized).deletingLastPathComponent().path
+
+        if AudioSystemDataClassifier.classify(path: normalized) != nil { return true }
+        if AudioSystemDataClassifier.classify(path: parent) != nil { return true }
+
+        return audioAssetPathMarkers.contains { marker in
+            lowerPath.contains(marker)
+        }
+    }
+
+    private var audioApplicationMarkers: [String] {
+        [
+            "ableton live",
+            "bitwig",
+            "cubase",
+            "digital performer",
+            "fl studio",
+            "garageband",
+            "kontakt",
+            "komplete kontrol",
+            "logic pro",
+            "luna",
+            "mainstage",
+            "maschine",
+            "nuendo",
+            "pro tools",
+            "reason",
+            "reaper",
+            "studio one",
+        ]
+    }
+
+    private var audioAssetPathMarkers: [String] {
+        [
+            "/ableton/",
+            "/audio music apps/",
+            "/audio/impulse responses/",
+            "/audio/plug-ins/",
+            "/audio/presets/",
+            "/avid/",
+            "/cubase/",
+            "/eastwest/",
+            "/factory library",
+            "/factory sounds",
+            "/garageband/",
+            "/izotope/",
+            "/kontakt",
+            "/logic/",
+            "/native instruments/",
+            "/output/",
+            "/plugin alliance/",
+            "/pro tools/",
+            "/sample libraries/",
+            "/samples/",
+            "/sessions/",
+            "/slate digital/",
+            "/sound libraries/",
+            "/spitfire",
+            "/studio one/",
+            "/superior drummer",
+            "/toontrack/",
+            "/uvi/",
+            "/waves/",
+            "/xln audio/",
+            "addictive drums",
+            "bounce",
+            "bounces",
+            "ezdrummer",
+            "exports",
+            "keyscape",
+            "mixes",
+            "omnisphere",
+        ]
+    }
+
     private func resetDuplicateSelection() {
         guard let result = controller.result else {
             selectedDuplicatePaths = []
@@ -1002,17 +1182,23 @@ struct ContentView: View {
     }
 
     private func isStageableDuplicatePath(_ path: String) -> Bool {
-        !StagingManager.isProtectedVendorResource(originalPath: path)
+        !DuplicateSafetyClassifier.isNeverRecommend(path: path)
     }
 
-    private func duplicateRecommendationLabel(isKeeper: Bool, isProtected: Bool) -> String {
-        if isProtected { return "Protected Plugin Resource" }
+    private func duplicateRecommendationLabel(
+        isKeeper: Bool,
+        safetyClassification: DuplicateSafetyClassification
+    ) -> String {
+        if safetyClassification.isNeverRecommend { return safetyClassification.label }
         return isKeeper ? "Recommended keep" : "Recommended staging"
     }
 
-    private func duplicateRecommendationDescription(isKeeper: Bool, isProtected: Bool) -> String {
-        if isProtected {
-            return "Used by installed audio software. Duplicate copies are often intentional and should not be cleaned automatically."
+    private func duplicateRecommendationDescription(
+        isKeeper: Bool,
+        safetyClassification: DuplicateSafetyClassification
+    ) -> String {
+        if safetyClassification.isNeverRecommend {
+            return safetyClassification.description
         }
         return isKeeper ? "SessionSweep recommends keeping this copy." : "SessionSweep recommends staging this redundant copy."
     }
