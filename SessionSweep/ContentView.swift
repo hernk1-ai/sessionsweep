@@ -121,6 +121,7 @@ final class ScanController: ObservableObject {
 struct ContentView: View {
     @StateObject private var controller = ScanController()
     @State private var selectedDuplicatePaths: Set<String> = []
+    @State private var selectedInstallerPaths: Set<String> = []
     @State private var stagedFiles: [StagedFile] = []
     @State private var appAlert: AppAlert?
     @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
@@ -142,6 +143,7 @@ struct ContentView: View {
         }
         .onChange(of: controller.result?.rootPath) { _ in
             resetDuplicateSelection()
+            selectedInstallerPaths.removeAll()
             refreshStaging()
         }
         .alert(item: $appAlert) { alert in
@@ -299,6 +301,7 @@ struct ContentView: View {
                 card { categorySection(r) }
                 card { audioSystemDataSection(r) }
                 card { duplicatesSection(r) }
+                card { installersSection(r) }
                 card { stagingSection() }
                 card { browserSection() }
 
@@ -524,6 +527,14 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
 
+                    HStack(spacing: 12) {
+                        Button("Select All") { selectAllDuplicates(r) }
+                            .buttonStyle(.borderless)
+                        Button("Deselect All") { deselectAllDuplicates() }
+                            .buttonStyle(.borderless)
+                        Spacer()
+                    }
+
                     if !selectedDuplicatePaths.isEmpty {
                         HStack(spacing: 10) {
                             Button { moveSelectedToStaging() } label: {
@@ -582,12 +593,13 @@ struct ContentView: View {
 
     private func duplicatePathRow(_ path: String, fileSize: Int64, keeper: String?) -> some View {
         let isKeeper = path == keeper
-        let isSelected = selectedDuplicatePaths.contains(path)
+        let isProtected = StagingManager.isProtectedVendorResource(originalPath: path)
+        let isSelected = selectedDuplicatePaths.contains(path) && !isProtected
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) },
+                get: { selectedDuplicatePaths.contains(path) && !isProtected },
                 set: { checked in
-                    if checked {
+                    if checked && !isProtected {
                         selectedDuplicatePaths.insert(path)
                     } else {
                         selectedDuplicatePaths.remove(path)
@@ -596,6 +608,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
+            .disabled(isProtected)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(path)
@@ -603,14 +616,117 @@ struct ContentView: View {
                     .foregroundStyle(isSelected ? .primary : .tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(isKeeper ? "Recommended keep" : "Recommended staging")
+                Text(duplicateRecommendationLabel(isKeeper: isKeeper, isProtected: isProtected))
                     .font(.caption2)
-                    .foregroundStyle(isKeeper ? Color.secondary : Color.teal)
+                    .foregroundStyle((isKeeper || isProtected) ? Color.secondary : Color.teal)
             }
             Spacer()
             Text(human(fileSize))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func installersSection(_ r: ScanResult) -> some View {
+        let sorted = r.installerFiles.sorted { $0.size > $1.size }
+        let total = sorted.reduce(Int64(0)) { $0 + $1.size }
+        let selectedBytes = sorted
+            .filter { selectedInstallerPaths.contains($0.url.path) }
+            .reduce(Int64(0)) { $0 + $1.size }
+
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Installers").font(.headline)
+                Spacer()
+                if total > 0 {
+                    Text("\(human(total)) reclaimable")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.teal)
+                }
+            }
+
+            if sorted.isEmpty {
+                Text("No leftover app installers found.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("App installers (.dmg, .pkg) left over after setup. Once an app is in Applications, its installer is safe to remove. SessionSweep flags installers whose app is already installed.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 12) {
+                    Button("Select All") { selectAllInstallers(sorted) }
+                        .buttonStyle(.borderless)
+                    Button("Deselect All") { deselectAllInstallers() }
+                        .buttonStyle(.borderless)
+                    Spacer()
+                }
+
+                if !selectedInstallerPaths.isEmpty {
+                    HStack(spacing: 10) {
+                        Button { moveSelectedInstallersToStaging() } label: {
+                            Label("Move to Staging", systemImage: "tray.and.arrow.down")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Text("\(selectedInstallerPaths.count) file\(selectedInstallerPaths.count == 1 ? "" : "s") selected · \(human(selectedBytes))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.vertical, 2)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(sorted) { item in
+                        installerRow(item)
+                    }
+                }
+            }
+        }
+    }
+
+    private func installerRow(_ item: SizedItem) -> some View {
+        let path = item.url.path
+        let isSelected = selectedInstallerPaths.contains(path)
+        let alreadyInstalled = InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { selectedInstallerPaths.contains(path) },
+                set: { checked in
+                    if checked {
+                        selectedInstallerPaths.insert(path)
+                    } else {
+                        selectedInstallerPaths.remove(path)
+                    }
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+
+            Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.displayName)
+                    .fontWeight(.medium)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if alreadyInstalled {
+                    Text("App already in Applications — safe to remove")
+                        .font(.caption2)
+                        .foregroundStyle(.teal)
+                } else {
+                    Text(item.parentPath)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+            Text(human(item.size))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }
@@ -641,6 +757,9 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
+                    Button { restoreAllStaged() } label: {
+                        Label("Restore All", systemImage: "arrow.uturn.backward")
+                    }
                     Button(role: .destructive) { clearStaging() } label: {
                         Label("Clear Staging", systemImage: "trash")
                     }
@@ -851,14 +970,43 @@ struct ContentView: View {
         }
         selectedDuplicatePaths = Set(result.duplicateGroups.flatMap { group in
             guard let keeper = recommendedKeeper(in: group) else { return [String]() }
-            return group.paths.filter { $0 != keeper }
+            return group.paths.filter { $0 != keeper && isStageableDuplicatePath($0) }
         })
+    }
+
+    private func selectAllDuplicates(_ r: ScanResult) {
+        selectedDuplicatePaths = Set(r.duplicateGroups.flatMap { group in
+            group.paths.filter(isStageableDuplicatePath)
+        })
+    }
+
+    private func deselectAllDuplicates() {
+        selectedDuplicatePaths.removeAll()
+    }
+
+    private func selectAllInstallers(_ items: [SizedItem]) {
+        selectedInstallerPaths = Set(items.map { $0.url.path })
+    }
+
+    private func deselectAllInstallers() {
+        selectedInstallerPaths.removeAll()
     }
 
     private func selectedDuplicateBytes(in result: ScanResult) -> Int64 {
         result.duplicateGroups.reduce(Int64(0)) { total, group in
-            total + Int64(group.paths.filter { selectedDuplicatePaths.contains($0) }.count) * group.fileSize
+            total + Int64(group.paths.filter {
+                selectedDuplicatePaths.contains($0) && isStageableDuplicatePath($0)
+            }.count) * group.fileSize
         }
+    }
+
+    private func isStageableDuplicatePath(_ path: String) -> Bool {
+        !StagingManager.isProtectedVendorResource(originalPath: path)
+    }
+
+    private func duplicateRecommendationLabel(isKeeper: Bool, isProtected: Bool) -> String {
+        if isProtected { return "Protected vendor resource" }
+        return isKeeper ? "Recommended keep" : "Recommended staging"
     }
 
     private func recommendedKeeper(in group: DuplicateGroup) -> String? {
@@ -916,14 +1064,19 @@ struct ContentView: View {
 
         let paths = selectedDuplicatePaths.sorted()
         var movedOriginalPaths: Set<String> = []
-        var failures: [String] = []
+        var skippedCount = 0
 
         for path in paths {
+            guard isStageableDuplicatePath(path) else {
+                skippedCount += 1
+                continue
+            }
+
             do {
                 let staged = try StagingManager.moveToStaging(originalPath: path)
                 movedOriginalPaths.insert(staged.originalPath)
             } catch {
-                failures.append(error.localizedDescription)
+                skippedCount += 1
             }
         }
 
@@ -933,11 +1086,8 @@ struct ContentView: View {
             refreshStaging()
         }
 
-        if !failures.isEmpty {
-            appAlert = AppAlert(
-                title: "Some Files Could Not Be Moved",
-                message: failures.prefix(4).joined(separator: "\n")
-            )
+        if skippedCount > 0 {
+            appAlert = skippedMoveAlert(count: skippedCount)
         }
     }
 
@@ -949,6 +1099,37 @@ struct ContentView: View {
             return DuplicateGroup(fileSize: group.fileSize, paths: remaining, sameName: group.sameName)
         }
         result.duplicateReclaimable = result.duplicateGroups.reduce(0) { $0 + $1.reclaimable }
+        controller.result = result
+    }
+
+    private func moveSelectedInstallersToStaging() {
+        let paths = selectedInstallerPaths.sorted()
+        var movedOriginalPaths: Set<String> = []
+        var skippedCount = 0
+
+        for path in paths {
+            do {
+                let staged = try StagingManager.moveToStaging(originalPath: path)
+                movedOriginalPaths.insert(staged.originalPath)
+            } catch {
+                skippedCount += 1
+            }
+        }
+
+        if !movedOriginalPaths.isEmpty {
+            applyMovedInstallerPaths(movedOriginalPaths)
+            selectedInstallerPaths.subtract(movedOriginalPaths)
+            refreshStaging()
+        }
+
+        if skippedCount > 0 {
+            appAlert = skippedMoveAlert(count: skippedCount)
+        }
+    }
+
+    private func applyMovedInstallerPaths(_ movedPaths: Set<String>) {
+        guard var result = controller.result else { return }
+        result.installerFiles = result.installerFiles.filter { !movedPaths.contains($0.url.path) }
         controller.result = result
     }
 
@@ -965,8 +1146,46 @@ struct ContentView: View {
             try StagingManager.restore(file)
             refreshStaging()
         } catch {
-            appAlert = AppAlert(title: "Could Not Restore File", message: error.localizedDescription)
+            appAlert = skippedRestoreAlert(count: 1)
         }
+    }
+
+    private func restoreAllStaged() {
+        var skippedCount = 0
+        for file in stagedFiles {
+            do {
+                try StagingManager.restore(file)
+            } catch {
+                skippedCount += 1
+            }
+        }
+        refreshStaging()
+
+        if skippedCount > 0 {
+            appAlert = skippedRestoreAlert(count: skippedCount)
+        }
+    }
+
+    private func skippedMoveAlert(count: Int) -> AppAlert {
+        AppAlert(
+            title: "Some Files Were Skipped Safely",
+            message: "SessionSweep could not move some files because macOS or the plugin vendor is protecting them. No files were deleted. The remaining selected files were moved when possible.\n\n\(skippedProtectedFilesLine(count))"
+        )
+    }
+
+    private func skippedRestoreAlert(count: Int) -> AppAlert {
+        AppAlert(
+            title: "Some Files Were Skipped Safely",
+            message: "SessionSweep could not restore some files because macOS, the plugin vendor, or the original location prevented the move. No staged files were deleted.\n\n\(skippedFilesLine(count))"
+        )
+    }
+
+    private func skippedProtectedFilesLine(_ count: Int) -> String {
+        "Skipped \(count) protected file\(count == 1 ? "" : "s")."
+    }
+
+    private func skippedFilesLine(_ count: Int) -> String {
+        "Skipped \(count) file\(count == 1 ? "" : "s")."
     }
 
     private func clearStaging() {

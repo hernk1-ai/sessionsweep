@@ -35,6 +35,34 @@ enum StagingManager {
             .appendingPathComponent("SessionSweep Staging", isDirectory: true)
     }
 
+    static func isProtectedVendorResource(originalPath: String) -> Bool {
+        let url = URL(fileURLWithPath: originalPath).standardizedFileURL
+        guard url.pathExtension.lowercased() == "box" else { return false }
+
+        let path = url.path.lowercased()
+        let vendorMarkers = [
+            "overloud",
+            "th-u",
+            "thu",
+            "slate digital",
+            "slate",
+        ]
+        guard vendorMarkers.contains(where: { path.contains($0) }) else { return false }
+
+        let pluginResourceMarkers = [
+            "/library/audio/plug-ins/",
+            "/library/audio/presets/",
+            "/library/application support/",
+            "/application support/",
+            "/plug-ins/",
+            "/plugins/",
+            "/presets/",
+            "/resources/",
+            "/factory/",
+        ]
+        return pluginResourceMarkers.contains { path.contains($0) }
+    }
+
     static func stagedFiles() throws -> [StagedFile] {
         let root = stagingFolderURL
         var isDirectory: ObjCBool = false

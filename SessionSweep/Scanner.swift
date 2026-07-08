@@ -127,6 +127,7 @@ struct ScanResult: Sendable {
     var identicalContentGroups: [DuplicateGroup] = []
     var duplicateReclaimable: Int64 = 0
     var identicalContentReclaimable: Int64 = 0
+    var installerFiles: [SizedItem] = []
 }
 
 enum Scanner {
@@ -140,13 +141,32 @@ enum Scanner {
 
     private static let excludedRoots = [
         "/System", "/private", "/usr", "/bin", "/sbin",
-        "/dev", "/cores", "/Network", "/opt", "/.vol"
+        "/dev", "/cores", "/Network", "/opt", "/.vol",
+        "/Library/Updates"
     ]
+
+    // Folders that indicate developer tooling artifacts rather than user content.
+    // These are excluded wherever they appear in the tree (not just at fixed roots),
+    // since things like node_modules can be nested many levels deep inside any
+    // project folder. Matching skips the whole subtree via skipDescendants(),
+    // so this also avoids wasted work walking into huge dependency trees.
+    private static func isDeveloperArtifact(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        if name == "node_modules" { return true }
+        if name == ".git" { return true }
+        if name == "Pods" { return true }
+        if name == ".build" { return true }
+        let p = url.path
+        if p.contains("/Library/Developer/Xcode/DerivedData") { return true }
+        return false
+    }
 
     private static func isExcluded(_ url: URL) -> Bool {
         let p = url.path
         for root in excludedRoots where p == root || p.hasPrefix(root + "/") { return true }
         if p.contains("/Library/Developer") { return true }
+        if p.contains("/Library/Application Support/Adobe") { return true }
+        if isDeveloperArtifact(url) { return true }
         return false
     }
 
@@ -250,8 +270,11 @@ enum Scanner {
             result.totalSize += size
             result.fileCount += 1
             result.categoryTotals[cat, default: 0] += size
-            insertTop(&result.topFiles,
-                      item: SizedItem(url: url, size: size, category: cat), limit: 20)
+            let sizedItem = SizedItem(url: url, size: size, category: cat)
+            insertTop(&result.topFiles, item: sizedItem, limit: 20)
+            if cat == .installers {
+                result.installerFiles.append(sizedItem)
+            }
             addToAncestors(of: url, size)
 
             let logical = Int64(v.fileSize ?? 0)
@@ -381,3 +404,4 @@ enum Scanner {
         }
     }
 }
+
