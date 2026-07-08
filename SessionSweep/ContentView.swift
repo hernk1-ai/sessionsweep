@@ -619,6 +619,7 @@ struct ContentView: View {
                 Text(duplicateRecommendationLabel(isKeeper: isKeeper, isProtected: isProtected))
                     .font(.caption2)
                     .foregroundStyle((isKeeper || isProtected) ? Color.secondary : Color.teal)
+                    .help(duplicateRecommendationDescription(isKeeper: isKeeper, isProtected: isProtected))
             }
             Spacer()
             Text(human(fileSize))
@@ -1005,8 +1006,15 @@ struct ContentView: View {
     }
 
     private func duplicateRecommendationLabel(isKeeper: Bool, isProtected: Bool) -> String {
-        if isProtected { return "Protected vendor resource" }
+        if isProtected { return "Protected Plugin Resource" }
         return isKeeper ? "Recommended keep" : "Recommended staging"
+    }
+
+    private func duplicateRecommendationDescription(isKeeper: Bool, isProtected: Bool) -> String {
+        if isProtected {
+            return "Used by installed audio software. Duplicate copies are often intentional and should not be cleaned automatically."
+        }
+        return isKeeper ? "SessionSweep recommends keeping this copy." : "SessionSweep recommends staging this redundant copy."
     }
 
     private func recommendedKeeper(in group: DuplicateGroup) -> String? {
@@ -1169,7 +1177,7 @@ struct ContentView: View {
     private func skippedMoveAlert(count: Int) -> AppAlert {
         AppAlert(
             title: "Some Files Were Skipped Safely",
-            message: "SessionSweep could not move some files because macOS or the plugin vendor is protecting them. No files were deleted. The remaining selected files were moved when possible.\n\n\(skippedProtectedFilesLine(count))"
+            message: "SessionSweep couldn't move some protected files because macOS or the plugin vendor prevents changes to them.\n\nNo protected files were deleted. SessionSweep skipped those files and moved the remaining selected files when possible.\n\n\(skippedProtectedFilesLine(count))"
         )
     }
 
@@ -1181,7 +1189,7 @@ struct ContentView: View {
     }
 
     private func skippedProtectedFilesLine(_ count: Int) -> String {
-        "Skipped \(count) protected file\(count == 1 ? "" : "s")."
+        "\(count) protected file\(count == 1 ? " was" : "s were") skipped."
     }
 
     private func skippedFilesLine(_ count: Int) -> String {

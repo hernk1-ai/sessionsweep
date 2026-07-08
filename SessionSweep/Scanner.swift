@@ -278,7 +278,7 @@ enum Scanner {
             addToAncestors(of: url, size)
 
             let logical = Int64(v.fileSize ?? 0)
-            if logical >= minDupSize {
+            if logical >= minDupSize && !ProtectedVendorResourceClassifier.isProtected(path: url.path) {
                 sizeBuckets[logical, default: []].append(url.path)
             }
         }
@@ -300,10 +300,12 @@ enum Scanner {
         if cancel?.isCancelled != true {
             let (confident, identical) = findDuplicates(
                 sizeBuckets: sizeBuckets, cancel: cancel, progress: progress)
-            result.duplicateGroups = confident
-            result.identicalContentGroups = identical
-            result.duplicateReclaimable = confident.reduce(0) { $0 + $1.reclaimable }
-            result.identicalContentReclaimable = identical.reduce(0) { $0 + $1.reclaimable }
+            let actionableConfident = filterProtectedDuplicateResources(confident)
+            let actionableIdentical = filterProtectedDuplicateResources(identical)
+            result.duplicateGroups = actionableConfident
+            result.identicalContentGroups = actionableIdentical
+            result.duplicateReclaimable = actionableConfident.reduce(0) { $0 + $1.reclaimable }
+            result.identicalContentReclaimable = actionableIdentical.reduce(0) { $0 + $1.reclaimable }
         }
         if cancel?.isCancelled == true { result.cancelled = true }
 
@@ -374,6 +376,22 @@ enum Scanner {
         return (confident, identical)
     }
 
+    private static nonisolated func filterProtectedDuplicateResources(
+        _ groups: [DuplicateGroup]
+    ) -> [DuplicateGroup] {
+        groups.compactMap { group in
+            let actionablePaths = group.paths.filter {
+                !ProtectedVendorResourceClassifier.isProtected(path: $0)
+            }
+            guard actionablePaths.count >= 2 else { return nil }
+            return DuplicateGroup(
+                fileSize: group.fileSize,
+                paths: actionablePaths.sorted(),
+                sameName: group.sameName)
+        }
+        .sorted { $0.reclaimable > $1.reclaimable }
+    }
+
     private static func partialHash(path: String, fileSize: Int64, sample: Int = 65536) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
         defer { try? handle.close() }
@@ -404,4 +422,3 @@ enum Scanner {
         }
     }
 }
-
