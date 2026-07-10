@@ -707,6 +707,63 @@ struct ContentView: View {
         max(0, items.count - compactCount)
     }
 
+    private struct IdenticalContentGroupPresentation: Identifiable {
+        let group: DuplicateGroup
+        let classification: DifferentNameMatchClassification
+
+        var id: DuplicateGroup.ID { group.id }
+        var representedStorageBytes: Int64 { group.fileSize * Int64(group.count) }
+        var largestFileBytes: Int64 { group.fileSize }
+        var filename: String { group.displayName }
+    }
+
+    private func sortedIdenticalContentGroups(
+        _ groups: [DuplicateGroup]
+    ) -> [IdenticalContentGroupPresentation] {
+        groups
+            .map { group in
+                IdenticalContentGroupPresentation(
+                    group: group,
+                    classification: DifferentNameMatchClassifier.classify(
+                        paths: group.paths,
+                        fileSize: group.fileSize
+                    )
+                )
+            }
+            .sorted { lhs, rhs in
+                let lhsCategory = identicalContentCategorySortRank(lhs.classification.kind)
+                let rhsCategory = identicalContentCategorySortRank(rhs.classification.kind)
+                if lhsCategory != rhsCategory { return lhsCategory < rhsCategory }
+
+                if lhs.representedStorageBytes != rhs.representedStorageBytes {
+                    return lhs.representedStorageBytes > rhs.representedStorageBytes
+                }
+
+                if lhs.largestFileBytes != rhs.largestFileBytes {
+                    return lhs.largestFileBytes > rhs.largestFileBytes
+                }
+
+                return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+            }
+    }
+
+    private func identicalContentCategorySortRank(_ kind: DifferentNameMatchKind) -> Int {
+        switch kind {
+        case .repeatedExportCopies:
+            return 0
+        case .possibleAlternateVersions:
+            return 1
+        case .possibleDuplicateTracks:
+            return 2
+        case .unclear:
+            return 3
+        case .likelyConsolidatedStems:
+            return 4
+        case .possibleSilentFiles:
+            return 5
+        }
+    }
+
     @ViewBuilder
     private func expandableResultListToggle(
         listID: String,
@@ -1115,13 +1172,14 @@ struct ContentView: View {
             if !r.identicalContentGroups.isEmpty {
                 let identicalContentGroupsListID = "identical-content-groups"
                 let identicalContentGroupLimit = 10
+                let sortedIdenticalContentItems = sortedIdenticalContentGroups(r.identicalContentGroups)
                 let visibleIdenticalContentGroups = visibleResultItems(
-                    r.identicalContentGroups,
+                    sortedIdenticalContentItems,
                     compactCount: identicalContentGroupLimit,
                     listID: identicalContentGroupsListID
                 )
                 let hiddenIdenticalContentGroupCount = hiddenResultItemCount(
-                    r.identicalContentGroups,
+                    sortedIdenticalContentItems,
                     compactCount: identicalContentGroupLimit
                 )
 
@@ -1132,7 +1190,9 @@ struct ContentView: View {
                     Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    ForEach(visibleIdenticalContentGroups) { identicalRow($0) }
+                    ForEach(visibleIdenticalContentGroups) { item in
+                        identicalRow(item.group, classification: item.classification)
+                    }
                     expandableResultListToggle(
                         listID: identicalContentGroupsListID,
                         hiddenCount: hiddenIdenticalContentGroupCount,
@@ -1397,8 +1457,10 @@ struct ContentView: View {
         .padding(.vertical, 3)
     }
 
-    private func identicalRow(_ g: DuplicateGroup) -> some View {
-        let classification = DifferentNameMatchClassifier.classify(paths: g.paths, fileSize: g.fileSize)
+    private func identicalRow(
+        _ g: DuplicateGroup,
+        classification: DifferentNameMatchClassification
+    ) -> some View {
         let fileListID = "identical-content-files-\(g.id.uuidString)"
         let fileLimit = 8
         let visiblePaths = visibleResultItems(g.paths, compactCount: fileLimit, listID: fileListID)
