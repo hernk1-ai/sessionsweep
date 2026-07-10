@@ -14,6 +14,7 @@ enum StagingError: LocalizedError {
     case stagedFileExists(String)
     case restoreDestinationExists(String)
     case invalidStagedPath(String)
+    case keepSafeProtected(String)
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +26,8 @@ enum StagingError: LocalizedError {
             return "A file already exists at the restore location: \(path)"
         case .invalidStagedPath(let path):
             return "This file is not inside the SessionSweep staging folder: \(path)"
+        case .keepSafeProtected(let path):
+            return "This item is marked Keep Safe and was not moved: \(path)"
         }
     }
 }
@@ -81,6 +84,9 @@ enum StagingManager {
 
     static func moveToStaging(originalPath: String) throws -> StagedFile {
         let source = URL(fileURLWithPath: originalPath).standardizedFileURL
+        guard !KeepSafeStore.shared.isProtected(source.path) else {
+            throw StagingError.keepSafeProtected(source.path)
+        }
         guard FileManager.default.fileExists(atPath: source.path) else {
             throw StagingError.sourceMissing(source.path)
         }

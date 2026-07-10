@@ -248,14 +248,16 @@ private extension Array where Element: Hashable {
 
 struct ContentView: View {
     @StateObject private var controller = ScanController()
+    @StateObject private var keepSafeStore = KeepSafeStore.shared
     @State private var selectedDuplicatePaths: Set<String> = []
     @State private var selectedInstallerPaths: Set<String> = []
     @State private var stagedFiles: [StagedFile] = []
     @State private var appAlert: AppAlert?
     @State private var showOtherLargeApplications = false
     @State private var expandedAudioGuidancePaths: Set<String> = []
-    @State private var expandedDifferentNameGroupIDs: Set<UUID> = []
+    @State private var expandedResultListIDs: Set<String> = []
     @State private var storageExplorerRoute: StorageExplorerRoute = .root
+    @State private var pendingRemoveKeepSafeItem: KeepSafeItem?
     @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
 
     var body: some View {
@@ -273,11 +275,12 @@ struct ContentView: View {
         .task {
             refreshStaging()
         }
-        .onChange(of: controller.result?.rootPath) { _ in
+        .onChange(of: scanResultExpansionIdentity(controller.result)) { _ in
             resetDuplicateSelection()
             selectedInstallerPaths.removeAll()
-            expandedDifferentNameGroupIDs.removeAll()
+            expandedResultListIDs.removeAll()
             storageExplorerRoute = .root
+            refreshKeepSafeFromCurrentScan()
             refreshStaging()
         }
         .alert(item: $appAlert) { alert in
@@ -286,6 +289,20 @@ struct ContentView: View {
                 message: Text(alert.message),
                 dismissButton: .default(Text("OK"))
             )
+        }
+        .alert("Remove Keep Safe?", isPresented: Binding(
+            get: { pendingRemoveKeepSafeItem != nil },
+            set: { if !$0 { pendingRemoveKeepSafeItem = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingRemoveKeepSafeItem = nil }
+            Button("Remove Keep Safe") {
+                if let item = pendingRemoveKeepSafeItem {
+                    removeKeepSafe(item)
+                }
+                pendingRemoveKeepSafeItem = nil
+            }
+        } message: {
+            Text("SessionSweep may include this item in future cleanup recommendations if it otherwise qualifies. The file will not be moved or deleted now.")
         }
     }
 
@@ -434,6 +451,7 @@ struct ContentView: View {
 
                 card { categorySection(r) }
                 card { audioSystemDataSection(r) }
+                card { keepSafeSection() }
                 card { duplicatesSection(r) }
                 card { installersSection(r) }
                 card { stagingSection() }
@@ -510,11 +528,230 @@ struct ContentView: View {
         }
     }
 
+    private func keepSafeSection() -> some View {
+        let items = sortedKeepSafeItems()
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Your Protected Files").font(.headline)
+                    Text("These are files and folders you asked SessionSweep to keep out of cleanup recommendations.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if !items.isEmpty {
+                    Text("\(items.count)")
+                        .font(.title3.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("Keep Safe only affects SessionSweep. It does not prevent files from being moved or deleted in Finder, another app, or by macOS. Keep Safe is not a backup.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if items.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("No protected files yet")
+                        .font(.callout)
+                    Text("Use Keep Safe on any file or folder you do not want SessionSweep to recommend or stage.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(items) { item in
+                        keepSafeItemRow(item)
+                    }
+                }
+            }
+        }
+    }
+
+    private func keepSafeItemRow(_ item: KeepSafeItem) -> some View {
+        let status = keepSafeStore.availability(for: item)
+        let currentPath = keepSafeStore.currentPath(for: item)
+        let guidance = keepSafeGuidance(for: item, currentPath: currentPath)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: item.itemType == .folder ? "folder.fill" : "doc.fill")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.displayName)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text("\(item.classification ?? item.category ?? "Protected item") · \(item.itemType.displayName) · \(keepSafeStatusText(status))")
+                        .font(.caption2)
+                        .foregroundStyle(status == .available ? Color.secondary : Color.orange)
+                }
+                Spacer()
+                Menu {
+                    Button("Reveal in Finder") { revealKeepSafeItem(item) }
+                    Button("Copy Path") { copyPath(currentPath) }
+                    Divider()
+                    Button("Remove from Keep Safe") { pendingRemoveKeepSafeItem = item }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .buttonStyle(.borderless)
+                .menuStyle(.button)
+                .help("Protected item actions")
+            }
+
+            Text(currentPath)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 10) {
+                Text(item.sizeAtProtection > 0 ? human(item.sizeAtProtection) : "Size unavailable")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(item.sizeAtProtection > 0 ? .secondary : .tertiary)
+                Label("Keep Safe", systemImage: "lock.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.teal)
+                Text("Protected \(item.dateProtected.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+
+            if let guidance {
+                Text(guidance)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func keepSafeGuidance(for item: KeepSafeItem, currentPath: String) -> String? {
+        if let audioItem = AudioSystemDataClassifier.classify(path: currentPath, size: item.sizeAtProtection) {
+            let guidance = AudioFolderGuidanceClassifier.guidance(for: audioItem)
+            return "\(guidance.displayTitle). \(guidance.explanation) \(guidance.guidance) Keep Safe remains active until you remove it."
+        }
+
+        if let classification = item.classification {
+            return "\(classification). Keep Safe prevents SessionSweep from recommending or staging this item."
+        }
+
+        return "Keep Safe prevents SessionSweep from recommending or staging this item while still allowing you to review its path and classification."
+    }
+
+    private func keepSafeStatusText(_ status: KeepSafeAvailabilityStatus) -> String {
+        switch status {
+        case .available:
+            return "Available"
+        case .locationChanged:
+            return "Location changed"
+        case .notAvailable:
+            return "Not currently available"
+        }
+    }
+
+    private func sortedKeepSafeItems() -> [KeepSafeItem] {
+        keepSafeStore.items.sorted { lhs, rhs in
+            let lhsKnown = lhs.sizeAtProtection > 0
+            let rhsKnown = rhs.sizeAtProtection > 0
+            if lhsKnown != rhsKnown { return lhsKnown }
+            if lhsKnown && rhsKnown && lhs.sizeAtProtection != rhs.sizeAtProtection {
+                return lhs.sizeAtProtection > rhs.sizeAtProtection
+            }
+            if lhs.dateProtected != rhs.dateProtected {
+                return lhs.dateProtected > rhs.dateProtected
+            }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+        }
+    }
+
+    private func scanResultExpansionIdentity(_ result: ScanResult?) -> String {
+        guard let result else { return "no-scan" }
+        return [
+            result.rootPath,
+            "\(result.fileCount)",
+            "\(result.totalSize)",
+            "\(result.unreadableCount)",
+            "\(result.elapsed)"
+        ].joined(separator: "|")
+    }
+
+    private func visibleResultItems<Item>(
+        _ items: [Item],
+        compactCount: Int,
+        listID: String
+    ) -> [Item] {
+        guard compactCount > 0,
+              items.count > compactCount,
+              !expandedResultListIDs.contains(listID)
+        else { return items }
+        return Array(items.prefix(compactCount))
+    }
+
+    private func hiddenResultItemCount<Item>(
+        _ items: [Item],
+        compactCount: Int
+    ) -> Int {
+        max(0, items.count - compactCount)
+    }
+
+    @ViewBuilder
+    private func expandableResultListToggle(
+        listID: String,
+        hiddenCount: Int,
+        itemSingular: String,
+        itemPlural: String,
+        expandedLabel: String? = nil,
+        accessibilityCollapsedLabel: String? = nil,
+        accessibilityExpandedLabel: String? = nil
+    ) -> some View {
+        if hiddenCount > 0 {
+            let isExpanded = expandedResultListIDs.contains(listID)
+            let collapsedTitle = "Show \(hiddenCount) more \(hiddenCount == 1 ? itemSingular : itemPlural)"
+            let expandedTitle = expandedLabel ?? "Hide additional \(itemPlural)"
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    if isExpanded {
+                        expandedResultListIDs.remove(listID)
+                    } else {
+                        expandedResultListIDs.insert(listID)
+                    }
+                }
+            } label: {
+                Label(isExpanded ? expandedTitle : collapsedTitle,
+                      systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.medium))
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.teal)
+            .accessibilityLabel(isExpanded
+                                ? (accessibilityExpandedLabel ?? expandedTitle)
+                                : (accessibilityCollapsedLabel ?? collapsedTitle))
+        }
+    }
+
     private func audioSystemDataSection(_ r: ScanResult) -> some View {
         let audio = r.audioSystemData
         let categories = AudioSystemDataCategory.allCases
             .map { ($0, audio.categoryTotals[$0] ?? 0) }
-        let rows = audio.items.prefix(12)
+        let detectedAudioFoldersListID = "audio-system-detected-folders"
+        let detectedAudioFolderLimit = 12
+        let rows = visibleResultItems(
+            audio.items,
+            compactCount: detectedAudioFolderLimit,
+            listID: detectedAudioFoldersListID
+        )
+        let hiddenDetectedAudioFolderCount = hiddenResultItemCount(
+            audio.items,
+            compactCount: detectedAudioFolderLimit
+        )
 
         return VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .firstTextBaseline) {
@@ -573,11 +810,16 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Detected audio folders").font(.subheadline.weight(.semibold))
-                    ForEach(Array(rows)) { audioSystemDataRow($0) }
-                    if audio.items.count > rows.count {
-                        Text("+ \(audio.items.count - rows.count) more audio folders")
-                            .font(.caption).foregroundStyle(.tertiary)
-                    }
+                    ForEach(rows) { audioSystemDataRow($0) }
+                    expandableResultListToggle(
+                        listID: detectedAudioFoldersListID,
+                        hiddenCount: hiddenDetectedAudioFolderCount,
+                        itemSingular: "audio folder",
+                        itemPlural: "audio folders",
+                        expandedLabel: "Hide additional audio folders",
+                        accessibilityCollapsedLabel: "Show \(hiddenDetectedAudioFolderCount) more detected audio folder\(hiddenDetectedAudioFolderCount == 1 ? "" : "s")",
+                        accessibilityExpandedLabel: "Hide additional detected audio folders"
+                    )
                 }
 
                 Text("These files are usually part of your music production environment—plugins, presets, impulse responses, and application support files. SessionSweep is showing them so you understand where storage is being used, not because they are automatically safe to delete.")
@@ -619,18 +861,27 @@ struct ContentView: View {
                     .truncationMode(.middle)
                 Spacer()
                 Text(item.safetyStatus.rawValue)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(item.safetyStatus.color)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
                     .help(item.safetyStatus.explanatoryCopy)
                     .accessibilityLabel(item.safetyStatus.explanatoryCopy)
+                keepSafeButton(
+                    path: item.path,
+                    itemType: .folder,
+                    size: item.size,
+                    classification: guidance.displayTitle,
+                    category: item.category.rawValue
+                )
                 Button {
                     toggleAudioGuidance(for: item.path)
                 } label: {
                     Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
-                        .imageScale(.small)
+                        .font(.callout)
+                        .padding(4)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
-                .help(isExpanded ? "Hide folder guidance" : "Show folder guidance")
+                .help("About this folder")
                 Text(human(item.size))
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -731,6 +982,28 @@ struct ContentView: View {
     private func largestAudioAssetsSection(_ r: ScanResult) -> some View {
         let audioAssets = largestAudioAssets(in: r)
         let otherLargeApplications = otherLargeApplications(in: r)
+        let audioAssetsListID = "largest-audio-assets"
+        let audioAssetsLimit = 12
+        let visibleAudioAssets = visibleResultItems(
+            audioAssets,
+            compactCount: audioAssetsLimit,
+            listID: audioAssetsListID
+        )
+        let hiddenAudioAssetCount = hiddenResultItemCount(
+            audioAssets,
+            compactCount: audioAssetsLimit
+        )
+        let otherApplicationsListID = "other-large-applications"
+        let otherApplicationsLimit = 8
+        let visibleOtherLargeApplications = visibleResultItems(
+            otherLargeApplications,
+            compactCount: otherApplicationsLimit,
+            listID: otherApplicationsListID
+        )
+        let hiddenOtherApplicationCount = hiddenResultItemCount(
+            otherLargeApplications,
+            compactCount: otherApplicationsLimit
+        )
 
         return VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
@@ -746,7 +1019,14 @@ struct ContentView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(audioAssets.prefix(12)) { fileRow($0) }
+                ForEach(visibleAudioAssets) { fileRow($0) }
+                expandableResultListToggle(
+                    listID: audioAssetsListID,
+                    hiddenCount: hiddenAudioAssetCount,
+                    itemSingular: "audio asset",
+                    itemPlural: "audio assets",
+                    expandedLabel: "Hide additional audio assets"
+                )
             }
 
             if !otherLargeApplications.isEmpty {
@@ -756,7 +1036,16 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        ForEach(otherLargeApplications.prefix(8)) { fileRow($0) }
+                        ForEach(visibleOtherLargeApplications) { fileRow($0) }
+                        expandableResultListToggle(
+                            listID: otherApplicationsListID,
+                            hiddenCount: hiddenOtherApplicationCount,
+                            itemSingular: "application",
+                            itemPlural: "applications",
+                            expandedLabel: "Hide additional applications",
+                            accessibilityCollapsedLabel: "Show \(hiddenOtherApplicationCount) more other large application\(hiddenOtherApplicationCount == 1 ? "" : "s")",
+                            accessibilityExpandedLabel: "Hide additional other large applications"
+                        )
                     }
                     .padding(.top, 6)
                 } label: {
@@ -776,13 +1065,15 @@ struct ContentView: View {
 
     private func duplicatesSection(_ r: ScanResult) -> some View {
         let selectedBytes = selectedDuplicateBytes(in: r)
+        let selectedCount = selectedDuplicatePaths.filter(isStageableDuplicatePath).count
+        let actionableReclaimable = actionableDuplicateReclaimable(in: r)
         return VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("Duplicate files").font(.headline)
                     Spacer()
-                    if r.duplicateReclaimable > 0 {
-                        Text("\(human(r.duplicateReclaimable)) reclaimable")
+                    if actionableReclaimable > 0 {
+                        Text("\(human(actionableReclaimable)) reclaimable")
                             .font(.callout.weight(.semibold)).foregroundStyle(.teal)
                     }
                 }
@@ -802,14 +1093,14 @@ struct ContentView: View {
                         Spacer()
                     }
 
-                    if !selectedDuplicatePaths.isEmpty {
+                    if selectedCount > 0 {
                         HStack(spacing: 10) {
                             Button { moveSelectedToStaging() } label: {
                                 Label("Move to Staging", systemImage: "tray.and.arrow.down")
                             }
                             .buttonStyle(.borderedProminent)
 
-                            Text("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected · \(human(selectedBytes))")
+                            Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -822,6 +1113,18 @@ struct ContentView: View {
             }
 
             if !r.identicalContentGroups.isEmpty {
+                let identicalContentGroupsListID = "identical-content-groups"
+                let identicalContentGroupLimit = 10
+                let visibleIdenticalContentGroups = visibleResultItems(
+                    r.identicalContentGroups,
+                    compactCount: identicalContentGroupLimit,
+                    listID: identicalContentGroupsListID
+                )
+                let hiddenIdenticalContentGroupCount = hiddenResultItemCount(
+                    r.identicalContentGroups,
+                    compactCount: identicalContentGroupLimit
+                )
+
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Identical content, different names", systemImage: "exclamationmark.triangle.fill")
@@ -829,11 +1132,16 @@ struct ContentView: View {
                     Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    ForEach(r.identicalContentGroups.prefix(10)) { identicalRow($0) }
-                    if r.identicalContentGroups.count > 10 {
-                        Text("+ \(r.identicalContentGroups.count - 10) more groups")
-                            .font(.caption).foregroundStyle(.tertiary)
-                    }
+                    ForEach(visibleIdenticalContentGroups) { identicalRow($0) }
+                    expandableResultListToggle(
+                        listID: identicalContentGroupsListID,
+                        hiddenCount: hiddenIdenticalContentGroupCount,
+                        itemSingular: "group",
+                        itemPlural: "groups",
+                        expandedLabel: "Hide additional groups",
+                        accessibilityCollapsedLabel: "Show \(hiddenIdenticalContentGroupCount) more identical-content group\(hiddenIdenticalContentGroupCount == 1 ? "" : "s")",
+                        accessibilityExpandedLabel: "Hide additional identical-content groups"
+                    )
                 }
             }
         }
@@ -841,6 +1149,7 @@ struct ContentView: View {
 
     private func confidentRow(_ g: DuplicateGroup) -> some View {
         let keeper = recommendedKeeper(in: g)
+        let actionableBytes = actionableDuplicateBytes(in: g, keeper: keeper)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.on.doc.fill").foregroundStyle(.teal).font(.caption)
@@ -848,7 +1157,7 @@ struct ContentView: View {
                     .lineLimit(1).truncationMode(.middle)
                 Text("×\(g.count)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(human(g.reclaimable)) reclaimable")
+                Text("\(human(actionableBytes)) reclaimable")
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
             ForEach(g.paths, id: \.self) { path in
@@ -862,12 +1171,14 @@ struct ContentView: View {
         let isKeeper = path == keeper
         let safetyClassification = DuplicateSafetyClassifier.classify(path: path)
         let isNeverRecommend = safetyClassification.isNeverRecommend
-        let isSelected = selectedDuplicatePaths.contains(path) && !isNeverRecommend
+        let keepSafeItem = keepSafeStore.protectedItem(for: path)
+        let isKeepSafe = keepSafeItem != nil
+        let isSelected = selectedDuplicatePaths.contains(path) && !isNeverRecommend && !isKeepSafe
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) && !isNeverRecommend },
+                get: { selectedDuplicatePaths.contains(path) && !isNeverRecommend && !isKeepSafe },
                 set: { checked in
-                    if checked && !isNeverRecommend {
+                    if checked && !isNeverRecommend && !isKeepSafe {
                         selectedDuplicatePaths.insert(path)
                     } else {
                         selectedDuplicatePaths.remove(path)
@@ -876,7 +1187,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(isNeverRecommend)
+            .disabled(isNeverRecommend || isKeepSafe)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(path)
@@ -886,22 +1197,31 @@ struct ContentView: View {
                     .truncationMode(.middle)
                 Text(duplicateRecommendationLabel(isKeeper: isKeeper, safetyClassification: safetyClassification))
                     .font(.caption2)
-                    .foregroundStyle((isKeeper || isNeverRecommend) ? Color.secondary : Color.teal)
+                    .foregroundStyle((isKeeper || isNeverRecommend || isKeepSafe) ? Color.secondary : Color.teal)
                     .help(duplicateRecommendationDescription(isKeeper: isKeeper, safetyClassification: safetyClassification))
             }
             Spacer()
             Text(human(fileSize))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
+            keepSafeButton(
+                path: path,
+                itemType: .file,
+                size: fileSize,
+                classification: safetyClassification.label,
+                category: "Duplicate File"
+            )
         }
         .padding(.vertical, 2)
     }
 
     private func installersSection(_ r: ScanResult) -> some View {
         let sorted = r.installerFiles.sorted { $0.size > $1.size }
-        let total = sorted.reduce(Int64(0)) { $0 + $1.size }
+        let stageable = sorted.filter { isStageableInstallerPath($0.url.path) }
+        let total = stageable.reduce(Int64(0)) { $0 + $1.size }
+        let selectedCount = selectedInstallerPaths.filter(isStageableInstallerPath).count
         let selectedBytes = sorted
-            .filter { selectedInstallerPaths.contains($0.url.path) }
+            .filter { selectedInstallerPaths.contains($0.url.path) && isStageableInstallerPath($0.url.path) }
             .reduce(Int64(0)) { $0 + $1.size }
 
         return VStack(alignment: .leading, spacing: 14) {
@@ -923,21 +1243,21 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 12) {
-                    Button("Select All") { selectAllInstallers(sorted) }
+                    Button("Select All") { selectAllInstallers(stageable) }
                         .buttonStyle(.borderless)
                     Button("Deselect All") { deselectAllInstallers() }
                         .buttonStyle(.borderless)
                     Spacer()
                 }
 
-                if !selectedInstallerPaths.isEmpty {
+                if selectedCount > 0 {
                     HStack(spacing: 10) {
                         Button { moveSelectedInstallersToStaging() } label: {
                             Label("Move to Staging", systemImage: "tray.and.arrow.down")
                         }
                         .buttonStyle(.borderedProminent)
 
-                        Text("\(selectedInstallerPaths.count) file\(selectedInstallerPaths.count == 1 ? "" : "s") selected · \(human(selectedBytes))")
+                        Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -956,13 +1276,15 @@ struct ContentView: View {
 
     private func installerRow(_ item: SizedItem) -> some View {
         let path = item.url.path
-        let isSelected = selectedInstallerPaths.contains(path)
+        let keepSafeItem = keepSafeStore.protectedItem(for: path)
+        let isKeepSafe = keepSafeItem != nil
+        let isSelected = selectedInstallerPaths.contains(path) && !isKeepSafe
         let alreadyInstalled = InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedInstallerPaths.contains(path) },
+                get: { selectedInstallerPaths.contains(path) && !isKeepSafe },
                 set: { checked in
-                    if checked {
+                    if checked && !isKeepSafe {
                         selectedInstallerPaths.insert(path)
                     } else {
                         selectedInstallerPaths.remove(path)
@@ -971,6 +1293,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
+            .disabled(isKeepSafe)
 
             Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
 
@@ -983,7 +1306,7 @@ struct ContentView: View {
                 if alreadyInstalled {
                     Text("App already in Applications — safe to remove")
                         .font(.caption2)
-                        .foregroundStyle(.teal)
+                        .foregroundStyle(isKeepSafe ? Color.secondary : Color.teal)
                 } else {
                     Text(item.parentPath)
                         .font(.caption2)
@@ -996,6 +1319,13 @@ struct ContentView: View {
             Text(human(item.size))
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
+            keepSafeButton(
+                path: path,
+                itemType: .file,
+                size: item.size,
+                classification: alreadyInstalled ? "Installer already installed" : "Installer",
+                category: Category.installers.displayName
+            )
         }
         .padding(.vertical, 2)
     }
@@ -1069,9 +1399,10 @@ struct ContentView: View {
 
     private func identicalRow(_ g: DuplicateGroup) -> some View {
         let classification = DifferentNameMatchClassifier.classify(paths: g.paths, fileSize: g.fileSize)
-        let isExpanded = expandedDifferentNameGroupIDs.contains(g.id)
-        let visiblePaths = isExpanded ? g.paths : Array(g.paths.prefix(8))
-        let hiddenCount = max(0, g.paths.count - visiblePaths.count)
+        let fileListID = "identical-content-files-\(g.id.uuidString)"
+        let fileLimit = 8
+        let visiblePaths = visibleResultItems(g.paths, compactCount: fileLimit, listID: fileListID)
+        let hiddenCount = hiddenResultItemCount(g.paths, compactCount: fileLimit)
         let sharedParent = DifferentNameMatchClassifier.sharedParent(paths: g.paths)
 
         return VStack(alignment: .leading, spacing: 7) {
@@ -1122,17 +1453,15 @@ struct ContentView: View {
                 }
             }
 
-            if g.paths.count > 8 {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        toggleDifferentNameGroupExpansion(g.id)
-                    }
-                } label: {
-                    Text(isExpanded ? "Hide additional files" : "Show \(hiddenCount) more")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-            }
+            expandableResultListToggle(
+                listID: fileListID,
+                hiddenCount: hiddenCount,
+                itemSingular: "file",
+                itemPlural: "files",
+                expandedLabel: "Hide additional files",
+                accessibilityCollapsedLabel: "Show \(hiddenCount) more identical-content file\(hiddenCount == 1 ? "" : "s")",
+                accessibilityExpandedLabel: "Hide additional identical-content files"
+            )
         }
         .padding(.vertical, 6)
     }
@@ -1161,6 +1490,14 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .trailing)
             Menu {
+                keepSafeMenuButton(
+                    path: path,
+                    itemType: .file,
+                    size: fileSize,
+                    classification: "Identical content, different names",
+                    category: Category.audioFiles.displayName
+                )
+                Divider()
                 Button("Reveal in Finder") { revealDifferentNameFileInFinder(path) }
                 Button("Copy Path") { copyPath(path) }
                 Button("Copy Filename") { copyFilename(path) }
@@ -1184,9 +1521,14 @@ struct ContentView: View {
             return AnyView(EmptyView())
         }
         let route = normalizedStorageExplorerRoute(storageExplorerRoute, in: result)
-        let nodes = storageExplorerNodes(for: route, in: result)
-        let parentTotal = max(storageExplorerTotal(for: route, nodes: nodes, in: result), 1)
-        let residual = storageExplorerResidual(for: route, nodes: nodes, parentTotal: parentTotal)
+        let allNodes = storageExplorerNodes(for: route, in: result)
+        let listID = storageExplorerListID(for: route)
+        let compactLimit = storageExplorerCompactLimit(for: route)
+        let nodes = visibleResultItems(allNodes, compactCount: compactLimit, listID: listID)
+        let hiddenNodeCount = hiddenResultItemCount(allNodes, compactCount: compactLimit)
+        let itemNames = storageExplorerItemNames(for: route)
+        let parentTotal = max(storageExplorerTotal(for: route, nodes: allNodes, in: result), 1)
+        let residual = storageExplorerResidual(for: route, nodes: allNodes, parentTotal: parentTotal)
 
         return AnyView(
             VStack(alignment: .leading, spacing: 14) {
@@ -1205,10 +1547,19 @@ struct ContentView: View {
                 storageExplorerBreadcrumbs(route, result: result)
                 VStack(spacing: 12) {
                     ForEach(nodes) { storageExplorerRow($0, parentTotal: parentTotal) }
+                    expandableResultListToggle(
+                        listID: listID,
+                        hiddenCount: hiddenNodeCount,
+                        itemSingular: itemNames.singular,
+                        itemPlural: itemNames.plural,
+                        expandedLabel: "Hide additional \(itemNames.plural)",
+                        accessibilityCollapsedLabel: "Show \(hiddenNodeCount) more storage explorer \(itemNames.singular)\(hiddenNodeCount == 1 ? "" : "s")",
+                        accessibilityExpandedLabel: "Hide additional storage explorer \(itemNames.plural)"
+                    )
                     if let residual, residual.size >= 1_048_576 {
                         residualRow(residual.size, parentTotal: parentTotal, title: residual.title)
                     }
-                    if nodes.isEmpty && (residual?.size ?? 0) < 1_048_576 {
+                    if allNodes.isEmpty && (residual?.size ?? 0) < 1_048_576 {
                         Text(storageExplorerEmptyMessage(for: route))
                             .font(.callout).foregroundStyle(.secondary)
                     }
@@ -1278,6 +1629,15 @@ struct ContentView: View {
                     Text(human(node.size))
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .frame(width: 88, alignment: .trailing)
+                    if let path = node.path {
+                        keepSafeButton(
+                            path: path,
+                            itemType: nil,
+                            size: node.size,
+                            classification: node.subtitle,
+                            category: node.title
+                        )
+                    }
                 }
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -1406,6 +1766,45 @@ struct ContentView: View {
             return "No familiar personal folders were found in this scan."
         case .rawFolder:
             return "This folder has no subfolders to drill into."
+        }
+    }
+
+    private func storageExplorerCompactLimit(for route: StorageExplorerRoute) -> Int {
+        switch route {
+        case .root, .audioProduction, .personalFiles:
+            return Int.max
+        case .audioCategory, .rawFolder:
+            return 25
+        case .applications:
+            return 30
+        }
+    }
+
+    private func storageExplorerListID(for route: StorageExplorerRoute) -> String {
+        switch route {
+        case .root:
+            return "storage-explorer-root"
+        case .audioProduction:
+            return "storage-explorer-audio-production"
+        case .audioCategory(let category):
+            return "storage-explorer-audio-category-\(category.rawValue)"
+        case .applications:
+            return "storage-explorer-applications"
+        case .personalFiles:
+            return "storage-explorer-personal-files"
+        case .rawFolder(let path, let source):
+            return "storage-explorer-raw-\(sourceBaseTitle(source))-\(normalizedPath(path))"
+        }
+    }
+
+    private func storageExplorerItemNames(for route: StorageExplorerRoute) -> (singular: String, plural: String) {
+        switch route {
+        case .applications:
+            return ("application", "applications")
+        case .root, .audioProduction:
+            return ("category", "categories")
+        case .audioCategory, .personalFiles, .rawFolder:
+            return ("folder", "folders")
         }
     }
 
@@ -1593,7 +1992,6 @@ struct ContentView: View {
         audioProductionContributors(in: result)
             .filter { $0.category == category }
             .sorted { $0.size > $1.size }
-            .prefix(25)
             .map { contributor in
                 let source = StorageExplorerSource.audio(category, basePath: contributor.path)
                 return StorageExplorerNode(
@@ -1615,7 +2013,7 @@ struct ContentView: View {
             .sorted { $0.size > $1.size }
 
         if !appItems.isEmpty {
-            return appItems.prefix(30).map { item in
+            return appItems.map { item in
                 StorageExplorerNode(
                     id: "app-\(item.url.path)",
                     title: applicationDisplayName(item.displayName),
@@ -1700,7 +2098,7 @@ struct ContentView: View {
         in result: ScanResult
     ) -> [StorageExplorerNode] {
         let parentTotal = max(size(ofPath: path, in: result), 1)
-        return controller.children(of: path).prefix(25).map { child in
+        return controller.children(of: path).map { child in
             let proportion = Double(child.size) / Double(parentTotal)
             let subtitle = proportion >= 0.01
                 ? "\(Int((proportion * 100).rounded()))% of this level"
@@ -2053,6 +2451,13 @@ struct ContentView: View {
             }
             Text(human(item.size))
                 .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+            keepSafeButton(
+                path: item.url.path,
+                itemType: nil,
+                size: item.size,
+                classification: item.category?.displayName,
+                category: item.category?.displayName
+            )
         }
     }
 
@@ -2219,12 +2624,131 @@ struct ContentView: View {
         NSPasteboard.general.setString(path, forType: .string)
     }
 
-    private func toggleDifferentNameGroupExpansion(_ id: UUID) {
-        if expandedDifferentNameGroupIDs.contains(id) {
-            expandedDifferentNameGroupIDs.remove(id)
-        } else {
-            expandedDifferentNameGroupIDs.insert(id)
+    @ViewBuilder
+    private func keepSafeButton(
+        path: String,
+        itemType: KeepSafeItemType?,
+        size: Int64,
+        classification: String?,
+        category: String?
+    ) -> some View {
+        let protectedItem = keepSafeStore.protectedItem(for: path)
+        Button {
+            if let protectedItem {
+                pendingRemoveKeepSafeItem = protectedItem
+            } else {
+                addKeepSafe(
+                    path: path,
+                    itemType: itemType,
+                    size: size,
+                    classification: classification,
+                    category: category
+                )
+            }
+        } label: {
+            Label("Keep Safe", systemImage: protectedItem == nil ? "lock" : "lock.fill")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.borderless)
+        .foregroundStyle(protectedItem == nil ? Color.secondary : Color.teal)
+        .help(protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe")
+    }
+
+    @ViewBuilder
+    private func keepSafeMenuButton(
+        path: String,
+        itemType: KeepSafeItemType?,
+        size: Int64,
+        classification: String?,
+        category: String?
+    ) -> some View {
+        if let protectedItem = keepSafeStore.protectedItem(for: path) {
+            Button("Remove from Keep Safe") {
+                pendingRemoveKeepSafeItem = protectedItem
+            }
+        } else {
+            Button("Keep Safe") {
+                addKeepSafe(
+                    path: path,
+                    itemType: itemType,
+                    size: size,
+                    classification: classification,
+                    category: category
+                )
+            }
+        }
+    }
+
+    private func addKeepSafe(
+        path: String,
+        itemType: KeepSafeItemType?,
+        size: Int64,
+        classification: String?,
+        category: String?
+    ) {
+        keepSafeStore.add(
+            path: path,
+            itemType: itemType,
+            size: size,
+            classification: classification,
+            category: category
+        )
+        selectedDuplicatePaths = selectedDuplicatePaths.filter(isStageableDuplicatePath)
+        selectedInstallerPaths = selectedInstallerPaths.filter(isStageableInstallerPath)
+    }
+
+    private func removeKeepSafe(_ item: KeepSafeItem) {
+        keepSafeStore.remove(id: item.id)
+        selectedDuplicatePaths.remove(item.originalPath)
+        selectedDuplicatePaths.remove(item.resolvedPath)
+        selectedInstallerPaths.remove(item.originalPath)
+        selectedInstallerPaths.remove(item.resolvedPath)
+    }
+
+    private func revealKeepSafeItem(_ item: KeepSafeItem) {
+        let path = keepSafeStore.currentPath(for: item)
+        guard FileManager.default.fileExists(atPath: path) else {
+            appAlert = AppAlert(
+                title: "File Not Found",
+                message: "This item may have been moved, removed, or be on a disconnected drive. Run a new scan to refresh available results."
+            )
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+    }
+
+    private func refreshKeepSafeFromCurrentScan() {
+        keepSafeStore.refreshAvailability()
+        guard let result = controller.result else { return }
+        var paths = result.folderSizes
+        for item in result.topFiles {
+            paths[item.url.path] = item.size
+        }
+        for item in result.installerFiles {
+            paths[item.url.path] = item.size
+        }
+        keepSafeStore.updateSeen(paths: paths)
+    }
+
+    private func actionableDuplicateReclaimable(in result: ScanResult) -> Int64 {
+        result.duplicateGroups.reduce(Int64(0)) { total, group in
+            total + actionableDuplicateBytes(in: group, keeper: recommendedKeeper(in: group))
+        }
+    }
+
+    private func actionableDuplicateBytes(in group: DuplicateGroup, keeper: String?) -> Int64 {
+        let count = group.paths.filter { path in
+            path != keeper && isStageableDuplicatePath(path)
+        }.count
+        return Int64(count) * group.fileSize
+    }
+
+    private func isStageableInstallerPath(_ path: String) -> Bool {
+        !keepSafeStore.isProtected(path)
     }
 
     private func revealDifferentNameFileInFinder(_ path: String) {
@@ -2297,7 +2821,7 @@ struct ContentView: View {
     }
 
     private func selectAllInstallers(_ items: [SizedItem]) {
-        selectedInstallerPaths = Set(items.map { $0.url.path })
+        selectedInstallerPaths = Set(items.map(\.url.path).filter(isStageableInstallerPath))
     }
 
     private func deselectAllInstallers() {
@@ -2313,7 +2837,7 @@ struct ContentView: View {
     }
 
     private func isStageableDuplicatePath(_ path: String) -> Bool {
-        !DuplicateSafetyClassifier.isNeverRecommend(path: path)
+        !DuplicateSafetyClassifier.isNeverRecommend(path: path) && !keepSafeStore.isProtected(path)
     }
 
     private func duplicateRecommendationLabel(
@@ -2390,16 +2914,20 @@ struct ContentView: View {
         let paths = selectedDuplicatePaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
+        var protectedSkippedCount = 0
 
         for path in paths {
             guard isStageableDuplicatePath(path) else {
-                skippedCount += 1
+                protectedSkippedCount += keepSafeStore.isProtected(path) ? 1 : 0
+                skippedCount += keepSafeStore.isProtected(path) ? 0 : 1
                 continue
             }
 
             do {
                 let staged = try StagingManager.moveToStaging(originalPath: path)
                 movedOriginalPaths.insert(staged.originalPath)
+            } catch StagingError.keepSafeProtected(_) {
+                protectedSkippedCount += 1
             } catch {
                 skippedCount += 1
             }
@@ -2411,7 +2939,9 @@ struct ContentView: View {
             refreshStaging()
         }
 
-        if skippedCount > 0 {
+        if protectedSkippedCount > 0 {
+            appAlert = protectedSkippedAlert(count: protectedSkippedCount)
+        } else if skippedCount > 0 {
             appAlert = skippedMoveAlert(count: skippedCount)
         }
     }
@@ -2431,11 +2961,18 @@ struct ContentView: View {
         let paths = selectedInstallerPaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
+        var protectedSkippedCount = 0
 
         for path in paths {
+            guard isStageableInstallerPath(path) else {
+                protectedSkippedCount += 1
+                continue
+            }
             do {
                 let staged = try StagingManager.moveToStaging(originalPath: path)
                 movedOriginalPaths.insert(staged.originalPath)
+            } catch StagingError.keepSafeProtected(_) {
+                protectedSkippedCount += 1
             } catch {
                 skippedCount += 1
             }
@@ -2447,7 +2984,9 @@ struct ContentView: View {
             refreshStaging()
         }
 
-        if skippedCount > 0 {
+        if protectedSkippedCount > 0 {
+            appAlert = protectedSkippedAlert(count: protectedSkippedCount)
+        } else if skippedCount > 0 {
             appAlert = skippedMoveAlert(count: skippedCount)
         }
     }
@@ -2495,6 +3034,13 @@ struct ContentView: View {
         AppAlert(
             title: "Some Files Were Skipped Safely",
             message: "SessionSweep couldn't move some protected files because macOS or the plugin vendor prevents changes to them.\n\nNo protected files were deleted. SessionSweep skipped those files and moved the remaining selected files when possible.\n\n\(skippedProtectedFilesLine(count))"
+        )
+    }
+
+    private func protectedSkippedAlert(count: Int) -> AppAlert {
+        AppAlert(
+            title: "Protected Items Were Skipped",
+            message: "SessionSweep skipped \(count) item\(count == 1 ? "" : "s") marked Keep Safe. No protected items were moved."
         )
     }
 
