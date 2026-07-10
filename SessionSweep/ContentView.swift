@@ -118,6 +118,134 @@ final class ScanController: ObservableObject {
     func hasChildren(_ path: String) -> Bool { !(result?.folderChildren[path]?.isEmpty ?? true) }
 }
 
+private enum StorageExplorerAudioCategory: String, CaseIterable, Hashable {
+    case plugins = "Plugins"
+    case pluginContent = "Plugin Content"
+    case presets = "Presets"
+    case sampleLibraries = "Sample Libraries"
+    case impulseResponses = "Impulse Responses"
+    case audioProjects = "Audio Projects"
+    case audioFiles = "Audio Files"
+    case cachesDownloads = "Caches / Downloads"
+    case otherAudioStorage = "Other Audio Storage"
+
+    var description: String {
+        switch self {
+        case .plugins:
+            return "Installed plug-in formats and audio units."
+        case .pluginContent:
+            return "Support files, factory content, databases, and vendor resources."
+        case .presets:
+            return "Preset folders used by instruments, effects, and DAWs."
+        case .sampleLibraries:
+            return "Sample packs, sound libraries, loops, and instrument libraries."
+        case .impulseResponses:
+            return "IR libraries for reverbs, cabinets, and acoustic processors."
+        case .audioProjects:
+            return "DAW sessions, projects, and production folders."
+        case .audioFiles:
+            return "Bounces, stems, mixes, renders, and standalone audio files."
+        case .cachesDownloads:
+            return "Audio software caches, pack downloads, and temporary content."
+        case .otherAudioStorage:
+            return "Audio-related storage that does not fit another category."
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .plugins: return "puzzlepiece.extension.fill"
+        case .pluginContent: return "shippingbox.fill"
+        case .presets: return "slider.horizontal.3"
+        case .sampleLibraries: return "waveform"
+        case .impulseResponses: return "dot.radiowaves.left.and.right"
+        case .audioProjects: return "music.note.list"
+        case .audioFiles: return "waveform.path"
+        case .cachesDownloads: return "arrow.down.circle.fill"
+        case .otherAudioStorage: return "folder.fill"
+        }
+    }
+}
+
+private enum StorageExplorerPersonalFolder: String, CaseIterable, Hashable {
+    case desktop = "Desktop"
+    case documents = "Documents"
+    case downloads = "Downloads"
+    case music = "Music"
+    case movies = "Movies"
+    case projects = "Projects"
+    case other = "Other Personal Files"
+
+    var description: String {
+        switch self {
+        case .desktop:
+            return "Files saved on your Desktop."
+        case .documents:
+            return "Documents and user-created folders."
+        case .downloads:
+            return "Downloaded files, installers, archives, and transfers."
+        case .music:
+            return "Music folder content outside audio-system locations."
+        case .movies:
+            return "Video and media files in your Movies folder."
+        case .projects:
+            return "Project and session folders in common user locations."
+        case .other:
+            return "Other user-level storage not already shown above."
+        }
+    }
+}
+
+private enum StorageExplorerSource: Hashable {
+    case audio(StorageExplorerAudioCategory, basePath: String)
+    case applications(basePath: String)
+    case personal(StorageExplorerPersonalFolder, basePath: String)
+    case otherMac(basePath: String)
+}
+
+private enum StorageExplorerRoute: Hashable {
+    case root
+    case audioProduction
+    case audioCategory(StorageExplorerAudioCategory)
+    case applications
+    case personalFiles
+    case rawFolder(path: String, source: StorageExplorerSource)
+}
+
+private struct StorageExplorerNode: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let path: String?
+    let size: Int64
+    let iconName: String
+    let color: Color
+    let route: StorageExplorerRoute?
+}
+
+private struct StorageExplorerContributor: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let path: String
+    let size: Int64
+    let category: StorageExplorerAudioCategory
+    let priority: Int
+}
+
+private struct StorageExplorerBreadcrumb: Identifiable {
+    let id: String
+    let title: String
+    let route: StorageExplorerRoute
+}
+
+private extension Array where Element: Hashable {
+    func removingDuplicates() -> [Element] {
+        var seen = Set<Element>()
+        return filter { seen.insert($0).inserted }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var controller = ScanController()
     @State private var selectedDuplicatePaths: Set<String> = []
@@ -125,6 +253,9 @@ struct ContentView: View {
     @State private var stagedFiles: [StagedFile] = []
     @State private var appAlert: AppAlert?
     @State private var showOtherLargeApplications = false
+    @State private var expandedAudioGuidancePaths: Set<String> = []
+    @State private var expandedDifferentNameGroupIDs: Set<UUID> = []
+    @State private var storageExplorerRoute: StorageExplorerRoute = .root
     @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
 
     var body: some View {
@@ -145,6 +276,8 @@ struct ContentView: View {
         .onChange(of: controller.result?.rootPath) { _ in
             resetDuplicateSelection()
             selectedInstallerPaths.removeAll()
+            expandedDifferentNameGroupIDs.removeAll()
+            storageExplorerRoute = .root
             refreshStaging()
         }
         .alert(item: $appAlert) { alert in
@@ -474,7 +607,10 @@ struct ContentView: View {
     }
 
     private func audioSystemDataRow(_ item: AudioSystemDataItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let guidance = AudioFolderGuidanceClassifier.guidance(for: item)
+        let isExpanded = expandedAudioGuidancePaths.contains(item.path)
+
+        return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Circle().fill(item.category.color).frame(width: 8, height: 8)
                 Text(item.friendlyName)
@@ -487,6 +623,14 @@ struct ContentView: View {
                     .foregroundStyle(item.safetyStatus.color)
                     .help(item.safetyStatus.explanatoryCopy)
                     .accessibilityLabel(item.safetyStatus.explanatoryCopy)
+                Button {
+                    toggleAudioGuidance(for: item.path)
+                } label: {
+                    Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
+                        .imageScale(.small)
+                }
+                .buttonStyle(.borderless)
+                .help(isExpanded ? "Hide folder guidance" : "Show folder guidance")
                 Text(human(item.size))
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
@@ -501,8 +645,87 @@ struct ContentView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+
+            if isExpanded {
+                audioFolderGuidanceDetails(item: item, guidance: guidance)
+            }
         }
         .padding(.vertical, 3)
+    }
+
+    private func audioFolderGuidanceDetails(
+        item: AudioSystemDataItem,
+        guidance: AudioFolderGuidance
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(item.friendlyName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(human(item.size))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                Text(guidance.displayTitle)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text("•")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Text(item.category.rawValue)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(item.category.color)
+                Spacer()
+                Button {
+                    revealAudioFolderInFinder(item.path)
+                } label: {
+                    Label("Reveal in Finder", systemImage: "folder")
+                }
+                .buttonStyle(.borderless)
+                Button {
+                    copyAudioFolderPath(item.path)
+                } label: {
+                    Label("Copy Path", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Text(guidance.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(guidance.guidance)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Label(
+                    guidance.expectedToRemainInPlace ? "Normally remains in place" : "May be relocatable with vendor support",
+                    systemImage: guidance.expectedToRemainInPlace ? "lock" : "externaldrive"
+                )
+                Label(
+                    guidance.vendorRelocationMayBePossible ? "Check vendor tools or settings" : "Manual relocation is not recommended",
+                    systemImage: guidance.vendorRelocationMayBePossible ? "gearshape" : "exclamationmark.triangle"
+                )
+            }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+
+            Text(item.path)
+                .font(.caption2.monospaced())
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.leading, 16)
+        .padding(.top, 4)
     }
 
     private func largestAudioAssetsSection(_ r: ScanResult) -> some View {
@@ -603,7 +826,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Label("Identical content, different names", systemImage: "exclamationmark.triangle.fill")
                         .font(.headline).foregroundStyle(.orange)
-                    Text("These files are byte-for-byte identical but have different names — often silent or empty stems from a consolidated session, which are NOT interchangeable. These are almost never safe to delete. Shown for awareness only; not counted as reclaimable.")
+                    Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     ForEach(r.identicalContentGroups.prefix(10)) { identicalRow($0) }
@@ -845,67 +1068,174 @@ struct ContentView: View {
     }
 
     private func identicalRow(_ g: DuplicateGroup) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let classification = DifferentNameMatchClassifier.classify(paths: g.paths, fileSize: g.fileSize)
+        let isExpanded = expandedDifferentNameGroupIDs.contains(g.id)
+        let visiblePaths = isExpanded ? g.paths : Array(g.paths.prefix(8))
+        let hiddenCount = max(0, g.paths.count - visiblePaths.count)
+        let sharedParent = DifferentNameMatchClassifier.sharedParent(paths: g.paths)
+
+        return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).font(.caption)
-                Text("\(g.count) identical files · different names").fontWeight(.medium)
+                Image(systemName: "waveform.badge.magnifyingglass").foregroundStyle(.orange).font(.caption)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(classification.title).fontWeight(.semibold)
+                    Text("\(g.count) files with identical audio content")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Text("\(human(g.fileSize)) each")
                     .font(.callout.monospacedDigit()).foregroundStyle(.tertiary)
             }
-            ForEach(g.paths.prefix(8), id: \.self) { path in
-                Text(path).font(.caption2).foregroundStyle(.tertiary)
-                    .lineLimit(1).truncationMode(.middle)
+
+            Text(classification.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Label("Total storage represented: \(human(g.fileSize * Int64(g.count)))", systemImage: "externaldrive")
+                if let sharedParent {
+                    Label("Shared folder: \(shortDisplayPath(sharedParent))", systemImage: "folder")
+                }
             }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+
+            if let reason = classification.reason {
+                Text("Reason: \(reason)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if classification.showsCautionNote {
+                Text("Review these files in context before making changes. Identical audio content does not prove the files are interchangeable.")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: 5) {
+                ForEach(visiblePaths, id: \.self) { path in
+                    differentNameFileRow(path, fileSize: g.fileSize, sharedParent: sharedParent)
+                }
+            }
+
             if g.paths.count > 8 {
-                Text("…and \(g.paths.count - 8) more")
-                    .font(.caption2).foregroundStyle(.tertiary)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        toggleDifferentNameGroupExpansion(g.id)
+                    }
+                } label: {
+                    Text(isExpanded ? "Hide additional files" : "Show \(hiddenCount) more")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
+    }
+
+    private func differentNameFileRow(
+        _ path: String,
+        fileSize: Int64,
+        sharedParent: String?
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "doc").foregroundStyle(.secondary).font(.caption)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(pathContext(path, sharedParent: sharedParent))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Text(human(fileSize))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 80, alignment: .trailing)
+            Button {
+                revealDifferentNameFileInFinder(path)
+            } label: {
+                Label("Reveal in Finder", systemImage: "magnifyingglass")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Reveal in Finder")
+            Button {
+                copyPath(path)
+            } label: {
+                Label("Copy Path", systemImage: "doc.on.doc")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Copy Path")
+            Button {
+                copyFilename(path)
+            } label: {
+                Label("Copy Filename", systemImage: "textformat")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Copy Filename")
+        }
+        .padding(.vertical, 2)
+        .contextMenu {
+            Button("Reveal in Finder") { revealDifferentNameFileInFinder(path) }
+            Button("Copy Path") { copyPath(path) }
+            Button("Copy Filename") { copyFilename(path) }
+        }
     }
 
     private func browserSection() -> some View {
-        let current = controller.currentPath
-        let parentTotal = max(controller.size(of: current), 1)
-        let kids = controller.children(of: current)
-        let shown = Array(kids.prefix(25))
-        let shownSum = shown.reduce(Int64(0)) { $0 + $1.size }
-        let residual = max(0, parentTotal - shownSum)
+        guard let result = controller.result else {
+            return AnyView(EmptyView())
+        }
+        let route = normalizedStorageExplorerRoute(storageExplorerRoute, in: result)
+        let nodes = storageExplorerNodes(for: route, in: result)
+        let parentTotal = max(storageExplorerTotal(for: route, nodes: nodes, in: result), 1)
+        let residual = storageExplorerResidual(for: route, nodes: nodes, parentTotal: parentTotal)
 
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Browse folders").font(.headline)
-                Spacer()
-                Text(human(parentTotal))
-                    .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            breadcrumbs()
-            VStack(spacing: 12) {
-                ForEach(shown) { childRow($0, parentTotal: parentTotal) }
-                if residual >= 1_048_576 { residualRow(residual, parentTotal: parentTotal) }
-                if shown.isEmpty && residual < 1_048_576 {
-                    Text("This folder has no subfolders to drill into.")
-                        .font(.callout).foregroundStyle(.secondary)
+        return AnyView(
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Storage Explorer").font(.headline)
+                        Text("Explore where storage is being used across your studio and Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Text(human(parentTotal))
+                        .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                storageExplorerBreadcrumbs(route, result: result)
+                VStack(spacing: 12) {
+                    ForEach(nodes) { storageExplorerRow($0, parentTotal: parentTotal) }
+                    if let residual, residual.size >= 1_048_576 {
+                        residualRow(residual.size, parentTotal: parentTotal, title: residual.title)
+                    }
+                    if nodes.isEmpty && (residual?.size ?? 0) < 1_048_576 {
+                        Text(storageExplorerEmptyMessage(for: route))
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
                 }
             }
-        }
+        )
     }
 
-    private func breadcrumbs() -> some View {
-        let root = controller.scannedPath
-        let current = controller.currentPath
-        var crumbs: [(name: String, path: String)] = []
-        let rootName = (root == "/") ? "/" : URL(fileURLWithPath: root).lastPathComponent
-        crumbs.append((rootName, root))
-        if current != root && current.hasPrefix(root) {
-            let rest = String(current.dropFirst(root.count)).split(separator: "/")
-            var accum = root
-            for comp in rest {
-                accum = (accum == "/") ? "/" + comp : accum + "/" + comp
-                crumbs.append((String(comp), accum))
-            }
-        }
+    private func storageExplorerBreadcrumbs(
+        _ route: StorageExplorerRoute,
+        result: ScanResult
+    ) -> some View {
+        let crumbs = storageExplorerBreadcrumbItems(for: route, in: result)
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 ForEach(Array(crumbs.enumerated()), id: \.offset) { idx, crumb in
@@ -913,8 +1243,8 @@ struct ContentView: View {
                         Image(systemName: "chevron.right")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    Button { controller.navigate(to: crumb.path) } label: {
-                        Text(crumb.name)
+                    Button { storageExplorerRoute = crumb.route } label: {
+                        Text(crumb.title)
                             .font(.callout)
                             .foregroundStyle(idx == crumbs.count - 1 ? .primary : .secondary)
                             .fontWeight(idx == crumbs.count - 1 ? .semibold : .regular)
@@ -925,25 +1255,41 @@ struct ContentView: View {
         }
     }
 
-    private func childRow(_ item: SizedItem, parentTotal: Int64) -> some View {
-        let proportion = max(0.01, Double(item.size) / Double(parentTotal))
-        let pct = Int((Double(item.size) / Double(parentTotal) * 100).rounded())
-        let drillable = controller.hasChildren(item.url.path)
+    private func storageExplorerRow(_ node: StorageExplorerNode, parentTotal: Int64) -> some View {
+        let proportion = max(0.01, min(1, Double(node.size) / Double(parentTotal)))
+        let pct = Int((Double(node.size) / Double(parentTotal) * 100).rounded())
+        let drillable = node.route != nil
         return Button {
-            if drillable { controller.navigate(to: item.url.path) }
+            if let route = node.route { storageExplorerRoute = route }
         } label: {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                    Image(systemName: "folder.fill").foregroundStyle(.teal).font(.caption)
-                    Text(item.displayName).fontWeight(.medium)
-                        .lineLimit(1).truncationMode(.middle)
+                    Image(systemName: node.iconName).foregroundStyle(node.color).font(.caption)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(node.title).fontWeight(.medium)
+                            .lineLimit(1).truncationMode(.middle)
+                        if !node.subtitle.isEmpty {
+                            Text(node.subtitle)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        if let path = node.path {
+                            Text(path)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                     if drillable {
                         Image(systemName: "chevron.right")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                     Spacer()
                     Text("\(pct)%").font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
-                    Text(human(item.size))
+                    Text(human(node.size))
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .frame(width: 88, alignment: .trailing)
                 }
@@ -964,13 +1310,17 @@ struct ContentView: View {
         .disabled(!drillable)
     }
 
-    private func residualRow(_ residual: Int64, parentTotal: Int64) -> some View {
-        let proportion = max(0.01, Double(residual) / Double(parentTotal))
+    private func residualRow(
+        _ residual: Int64,
+        parentTotal: Int64,
+        title: String = "Files & smaller items here"
+    ) -> some View {
+        let proportion = max(0.01, min(1, Double(residual) / Double(parentTotal)))
         let pct = Int((Double(residual) / Double(parentTotal) * 100).rounded())
         return VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.on.doc").foregroundStyle(.secondary).font(.caption)
-                Text("Files & smaller items here").foregroundStyle(.secondary)
+                Text(title).foregroundStyle(.secondary)
                 Spacer()
                 Text("\(pct)%").font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
                 Text(human(residual))
@@ -985,6 +1335,717 @@ struct ContentView: View {
                 }
             }
             .frame(height: 7)
+        }
+    }
+
+    private func normalizedStorageExplorerRoute(
+        _ route: StorageExplorerRoute,
+        in result: ScanResult
+    ) -> StorageExplorerRoute {
+        switch route {
+        case .rawFolder(let path, _):
+            return size(ofPath: path, in: result) > 0 ? route : .root
+        default:
+            return route
+        }
+    }
+
+    private func storageExplorerNodes(
+        for route: StorageExplorerRoute,
+        in result: ScanResult
+    ) -> [StorageExplorerNode] {
+        switch route {
+        case .root:
+            return storageExplorerRootNodes(in: result)
+        case .audioProduction:
+            return audioProductionCategoryNodes(in: result)
+        case .audioCategory(let category):
+            return audioProductionContributorNodes(for: category, in: result)
+        case .applications:
+            return applicationExplorerNodes(in: result)
+        case .personalFiles:
+            return personalExplorerNodes(in: result)
+        case .rawFolder(let path, let source):
+            return rawFolderExplorerNodes(path: path, source: source, in: result)
+        }
+    }
+
+    private func storageExplorerTotal(
+        for route: StorageExplorerRoute,
+        nodes: [StorageExplorerNode],
+        in result: ScanResult
+    ) -> Int64 {
+        switch route {
+        case .root:
+            return max(scanRootSize(result), nodes.reduce(Int64(0)) { $0 + $1.size })
+        case .audioProduction, .audioCategory, .personalFiles:
+            return nodes.reduce(Int64(0)) { $0 + $1.size }
+        case .applications:
+            return max(applicationsTotal(in: result), nodes.reduce(Int64(0)) { $0 + $1.size })
+        case .rawFolder(let path, _):
+            return size(ofPath: path, in: result)
+        }
+    }
+
+    private func storageExplorerResidual(
+        for route: StorageExplorerRoute,
+        nodes: [StorageExplorerNode],
+        parentTotal: Int64
+    ) -> (title: String, size: Int64)? {
+        let shownSum = nodes.reduce(Int64(0)) { $0 + $1.size }
+        let residual = max(0, parentTotal - shownSum)
+        guard residual > 0 else { return nil }
+
+        switch route {
+        case .applications:
+            return ("Other applications and smaller app items", residual)
+        case .rawFolder:
+            return ("Files & smaller items here", residual)
+        default:
+            return nil
+        }
+    }
+
+    private func storageExplorerEmptyMessage(for route: StorageExplorerRoute) -> String {
+        switch route {
+        case .root:
+            return "No browsable storage groups were found in this scan."
+        case .audioProduction:
+            return "No audio-production storage categories were found in this scan."
+        case .audioCategory:
+            return "No contributing folders were found for this category."
+        case .applications:
+            return "No installed applications were found in this scan."
+        case .personalFiles:
+            return "No familiar personal folders were found in this scan."
+        case .rawFolder:
+            return "This folder has no subfolders to drill into."
+        }
+    }
+
+    private func storageExplorerBreadcrumbItems(
+        for route: StorageExplorerRoute,
+        in result: ScanResult
+    ) -> [StorageExplorerBreadcrumb] {
+        var crumbs = [
+            StorageExplorerBreadcrumb(
+                id: "root",
+                title: storageRootLabel(for: result),
+                route: .root
+            )
+        ]
+
+        switch route {
+        case .root:
+            break
+        case .audioProduction:
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio", title: "Audio Production", route: .audioProduction))
+        case .audioCategory(let category):
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio", title: "Audio Production", route: .audioProduction))
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-\(category.rawValue)", title: category.rawValue, route: route))
+        case .applications:
+            crumbs.append(StorageExplorerBreadcrumb(id: "applications", title: "Applications", route: .applications))
+        case .personalFiles:
+            crumbs.append(StorageExplorerBreadcrumb(id: "personal", title: "Personal Files", route: .personalFiles))
+        case .rawFolder(let path, let source):
+            appendSourceBreadcrumbs(source, route: route, result: result, crumbs: &crumbs)
+            appendRawPathBreadcrumbs(path: path, source: source, crumbs: &crumbs)
+        }
+
+        return crumbs
+    }
+
+    private func appendSourceBreadcrumbs(
+        _ source: StorageExplorerSource,
+        route: StorageExplorerRoute,
+        result: ScanResult,
+        crumbs: inout [StorageExplorerBreadcrumb]
+    ) {
+        switch source {
+        case .audio(let category, _):
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio", title: "Audio Production", route: .audioProduction))
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-\(category.rawValue)", title: category.rawValue, route: .audioCategory(category)))
+        case .applications:
+            crumbs.append(StorageExplorerBreadcrumb(id: "applications", title: "Applications", route: .applications))
+        case .personal(let folder, _):
+            crumbs.append(StorageExplorerBreadcrumb(id: "personal", title: "Personal Files", route: .personalFiles))
+            if folder == .other {
+                crumbs.append(StorageExplorerBreadcrumb(
+                    id: "personal-other",
+                    title: folder.rawValue,
+                    route: .rawFolder(path: sourceBasePath(source), source: source)
+                ))
+            }
+        case .otherMac:
+            crumbs.append(StorageExplorerBreadcrumb(
+                id: "other-mac",
+                title: "Other Mac Storage",
+                route: .rawFolder(path: sourceBasePath(source), source: source)
+            ))
+        }
+    }
+
+    private func appendRawPathBreadcrumbs(
+        path: String,
+        source: StorageExplorerSource,
+        crumbs: inout [StorageExplorerBreadcrumb]
+    ) {
+        let base = sourceBasePath(source)
+        let baseTitle = sourceBaseTitle(source)
+        let currentPath = normalizedPath(path)
+        let normalizedBase = normalizedPath(base)
+        let baseAlreadyShown = sourceBaseIsAlreadyShown(source)
+
+        guard currentPath == normalizedBase || pathContains(normalizedBase, candidate: currentPath) else {
+            crumbs.append(StorageExplorerBreadcrumb(id: currentPath, title: displayName(forPath: currentPath), route: .rawFolder(path: currentPath, source: source)))
+            return
+        }
+
+        if !baseAlreadyShown {
+            crumbs.append(StorageExplorerBreadcrumb(id: normalizedBase, title: baseTitle, route: .rawFolder(path: normalizedBase, source: source)))
+        }
+
+        guard currentPath != normalizedBase else { return }
+        let relative = normalizedBase == "/"
+            ? String(currentPath.dropFirst(1))
+            : String(currentPath.dropFirst(normalizedBase.count + 1))
+        var accumulated = normalizedBase
+        for component in relative.split(separator: "/").map(String.init) {
+            accumulated = accumulated == "/" ? "/\(component)" : "\(accumulated)/\(component)"
+            crumbs.append(StorageExplorerBreadcrumb(
+                id: accumulated,
+                title: component,
+                route: .rawFolder(path: accumulated, source: source)
+            ))
+        }
+    }
+
+    private func storageExplorerRootNodes(in result: ScanResult) -> [StorageExplorerNode] {
+        let audioTotal = audioProductionTotal(in: result)
+        let appsTotal = applicationsTotal(in: result)
+        let personalTotal = personalExplorerNodes(in: result).reduce(Int64(0)) { $0 + $1.size }
+        let rootTotal = scanRootSize(result)
+        let otherTotal = max(0, rootTotal - audioTotal - appsTotal - personalTotal)
+
+        var nodes: [StorageExplorerNode] = []
+        if audioTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "audio-production",
+                title: "Audio Production",
+                subtitle: "Plugins, presets, sample libraries, audio support files, and production content.",
+                path: nil,
+                size: audioTotal,
+                iconName: "waveform",
+                color: .teal,
+                route: .audioProduction
+            ))
+        }
+        if appsTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "applications",
+                title: "Applications",
+                subtitle: "Installed apps and their storage usage.",
+                path: nil,
+                size: appsTotal,
+                iconName: "app.fill",
+                color: .brown,
+                route: .applications
+            ))
+        }
+        if personalTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "personal-files",
+                title: "Personal Files",
+                subtitle: "Projects, documents, downloads, desktop files, and other user-created content.",
+                path: nil,
+                size: personalTotal,
+                iconName: "person.crop.square.fill",
+                color: .cyan,
+                route: .personalFiles
+            ))
+        }
+        if otherTotal >= 1_048_576 {
+            let source = StorageExplorerSource.otherMac(basePath: result.rootPath)
+            nodes.append(StorageExplorerNode(
+                id: "other-mac-storage",
+                title: "Other Mac Storage",
+                subtitle: "Scanned storage that does not fit the studio, app, or personal groups.",
+                path: nil,
+                size: otherTotal,
+                iconName: "internaldrive.fill",
+                color: .secondary,
+                route: .rawFolder(path: result.rootPath, source: source)
+            ))
+        }
+        return nodes
+    }
+
+    private func audioProductionCategoryNodes(in result: ScanResult) -> [StorageExplorerNode] {
+        let contributors = audioProductionContributors(in: result)
+        let totals = Dictionary(grouping: contributors, by: \.category)
+            .mapValues { $0.reduce(Int64(0)) { $0 + $1.size } }
+
+        return StorageExplorerAudioCategory.allCases.compactMap { category in
+            guard let total = totals[category], total > 0 else { return nil }
+            return StorageExplorerNode(
+                id: "audio-category-\(category.rawValue)",
+                title: category.rawValue,
+                subtitle: category.description,
+                path: nil,
+                size: total,
+                iconName: category.iconName,
+                color: audioCategoryColor(category),
+                route: .audioCategory(category)
+            )
+        }
+    }
+
+    private func audioProductionContributorNodes(
+        for category: StorageExplorerAudioCategory,
+        in result: ScanResult
+    ) -> [StorageExplorerNode] {
+        audioProductionContributors(in: result)
+            .filter { $0.category == category }
+            .sorted { $0.size > $1.size }
+            .prefix(25)
+            .map { contributor in
+                let source = StorageExplorerSource.audio(category, basePath: contributor.path)
+                return StorageExplorerNode(
+                    id: contributor.id,
+                    title: contributor.title,
+                    subtitle: contributor.subtitle,
+                    path: contributor.path,
+                    size: contributor.size,
+                    iconName: category.iconName,
+                    color: audioCategoryColor(category),
+                    route: controller.hasChildren(contributor.path) ? .rawFolder(path: contributor.path, source: source) : nil
+                )
+            }
+    }
+
+    private func applicationExplorerNodes(in result: ScanResult) -> [StorageExplorerNode] {
+        let appItems = result.topFiles
+            .filter { $0.category == .applications }
+            .sorted { $0.size > $1.size }
+
+        if !appItems.isEmpty {
+            return appItems.prefix(30).map { item in
+                StorageExplorerNode(
+                    id: "app-\(item.url.path)",
+                    title: applicationDisplayName(item.displayName),
+                    subtitle: "Installed application",
+                    path: item.url.path,
+                    size: item.size,
+                    iconName: "app.fill",
+                    color: isAudioApplication(item) ? .teal : .brown,
+                    route: controller.hasChildren(item.url.path)
+                        ? .rawFolder(path: item.url.path, source: .applications(basePath: item.url.path))
+                        : nil
+                )
+            }
+        }
+
+        return applicationFolderPaths(in: result).map { path in
+            StorageExplorerNode(
+                id: "app-folder-\(path)",
+                title: displayName(forPath: path),
+                subtitle: "Applications folder",
+                path: path,
+                size: size(ofPath: path, in: result),
+                iconName: "folder.fill",
+                color: .brown,
+                route: .rawFolder(path: path, source: .applications(basePath: path))
+            )
+        }
+    }
+
+    private func personalExplorerNodes(in result: ScanResult) -> [StorageExplorerNode] {
+        let home = normalizedPath(NSHomeDirectory())
+        let audioPaths = audioProductionContributors(in: result).map(\.path)
+        let projectPaths = personalProjectPaths(in: result)
+        let homeApplications = "\(home)/Applications"
+
+        let folderSpecs: [(StorageExplorerPersonalFolder, String, [String])] = [
+            (.desktop, "\(home)/Desktop", audioPaths),
+            (.documents, "\(home)/Documents", audioPaths + projectPaths),
+            (.downloads, "\(home)/Downloads", audioPaths),
+            (.music, "\(home)/Music", audioPaths + projectPaths),
+            (.movies, "\(home)/Movies", audioPaths),
+        ]
+
+        var nodes: [StorageExplorerNode] = folderSpecs.compactMap { spec in
+            let (folder, path, exclusions) = spec
+            let size = adjustedFolderSize(path, in: result, excluding: exclusions)
+            guard size > 0 else { return nil }
+            return personalNode(folder: folder, path: path, size: size)
+        }
+
+        let projectTotal = totalSize(ofPaths: projectPaths, in: result, excluding: audioPaths)
+        if projectTotal > 0 {
+            let routePath = projectPaths.first ?? "\(home)/Projects"
+            nodes.append(personalNode(folder: .projects, path: routePath, size: projectTotal))
+        }
+
+        let homeSize = size(ofPath: home, in: result)
+        if homeSize > 0 {
+            let namedRawPaths = folderSpecs.map { $0.1 } + projectPaths + [homeApplications]
+            let excludedTotal = totalSize(ofPaths: namedRawPaths + audioPaths, in: result)
+            let other = max(0, homeSize - excludedTotal)
+            if other >= 1_048_576 {
+                nodes.append(StorageExplorerNode(
+                    id: "personal-other",
+                    title: StorageExplorerPersonalFolder.other.rawValue,
+                    subtitle: StorageExplorerPersonalFolder.other.description,
+                    path: home,
+                    size: other,
+                    iconName: "folder.fill",
+                    color: .secondary,
+                    route: .rawFolder(path: home, source: .personal(.other, basePath: home))
+                ))
+            }
+        }
+
+        return nodes
+    }
+
+    private func rawFolderExplorerNodes(
+        path: String,
+        source: StorageExplorerSource,
+        in result: ScanResult
+    ) -> [StorageExplorerNode] {
+        let parentTotal = max(size(ofPath: path, in: result), 1)
+        return controller.children(of: path).prefix(25).map { child in
+            let proportion = Double(child.size) / Double(parentTotal)
+            let subtitle = proportion >= 0.01
+                ? "\(Int((proportion * 100).rounded()))% of this level"
+                : "Less than 1% of this level"
+            return StorageExplorerNode(
+                id: "raw-\(child.url.path)",
+                title: child.displayName,
+                subtitle: subtitle,
+                path: child.url.path,
+                size: child.size,
+                iconName: "folder.fill",
+                color: .teal,
+                route: controller.hasChildren(child.url.path)
+                    ? .rawFolder(path: child.url.path, source: source)
+                    : nil
+            )
+        }
+    }
+
+    private func personalNode(
+        folder: StorageExplorerPersonalFolder,
+        path: String,
+        size: Int64
+    ) -> StorageExplorerNode {
+        StorageExplorerNode(
+            id: "personal-\(folder.rawValue)-\(path)",
+            title: folder.rawValue,
+            subtitle: folder.description,
+            path: path,
+            size: size,
+            iconName: folder == .downloads ? "arrow.down.circle.fill" : "folder.fill",
+            color: folder == .downloads ? .orange : .cyan,
+            route: .rawFolder(path: path, source: .personal(folder, basePath: path))
+        )
+    }
+
+    private func audioProductionTotal(in result: ScanResult) -> Int64 {
+        audioProductionContributors(in: result).reduce(Int64(0)) { $0 + $1.size }
+    }
+
+    private func audioProductionContributors(in result: ScanResult) -> [StorageExplorerContributor] {
+        var candidates: [StorageExplorerContributor] = []
+
+        for item in result.audioSystemData.items {
+            candidates.append(StorageExplorerContributor(
+                id: "audio-system-\(item.path)",
+                title: item.friendlyName,
+                subtitle: item.category.rawValue,
+                path: item.path,
+                size: item.size,
+                category: audioCategory(for: item.category),
+                priority: 100
+            ))
+        }
+
+        for (path, size) in result.folderSizes where size >= 1_048_576 {
+            let normalized = normalizedPath(path)
+            guard AudioSystemDataClassifier.classify(path: normalized) == nil,
+                  let category = audioCategory(forFolderPath: normalized) else { continue }
+            candidates.append(StorageExplorerContributor(
+                id: "audio-folder-\(normalized)",
+                title: displayName(forPath: normalized),
+                subtitle: category.rawValue,
+                path: normalized,
+                size: size,
+                category: category,
+                priority: 70
+            ))
+        }
+
+        for item in result.topFiles where item.category != .applications && isAudioAsset(item) {
+            let path = normalizedPath(item.url.path)
+            guard let category = audioCategory(for: item) else { continue }
+            candidates.append(StorageExplorerContributor(
+                id: "audio-item-\(path)",
+                title: item.displayName,
+                subtitle: item.category?.displayName ?? category.rawValue,
+                path: path,
+                size: item.size,
+                category: category,
+                priority: 40
+            ))
+        }
+
+        return nonOverlappingContributors(candidates)
+    }
+
+    private func nonOverlappingContributors(
+        _ candidates: [StorageExplorerContributor]
+    ) -> [StorageExplorerContributor] {
+        let sorted = candidates.sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
+            if lhs.size != rhs.size { return lhs.size > rhs.size }
+            return lhs.path < rhs.path
+        }
+
+        var selected: [StorageExplorerContributor] = []
+        for candidate in sorted {
+            if selected.contains(where: { pathsOverlap($0.path, candidate.path) }) { continue }
+            selected.append(candidate)
+        }
+        return selected
+    }
+
+    private func audioCategory(for category: AudioSystemDataCategory) -> StorageExplorerAudioCategory {
+        switch category {
+        case .plugins: return .plugins
+        case .presets: return .presets
+        case .impulseResponses: return .impulseResponses
+        case .pluginContent: return .pluginContent
+        case .cachesDownloads: return .cachesDownloads
+        }
+    }
+
+    private func audioCategory(for item: SizedItem) -> StorageExplorerAudioCategory? {
+        switch item.category {
+        case .projects:
+            return .audioProjects
+        case .plugins:
+            return .plugins
+        case .pluginData:
+            return .pluginContent
+        case .sampleLibraries:
+            return .sampleLibraries
+        case .audioFiles:
+            return .audioFiles
+        case .installers, .archives:
+            return audioCategory(forFolderPath: item.url.path) ?? .cachesDownloads
+        case .media, .other, nil:
+            return audioCategory(forFolderPath: item.url.path) ?? .otherAudioStorage
+        case .applications:
+            return nil
+        }
+    }
+
+    private func audioCategory(forFolderPath path: String) -> StorageExplorerAudioCategory? {
+        let lower = normalizedPath(path).lowercased()
+        if lower.contains("/library/audio/plug-ins/") { return .plugins }
+        if lower.contains("/library/audio/presets/") { return .presets }
+        if lower.contains("/library/audio/impulse responses/") { return .impulseResponses }
+        if lower.contains("/library/application support/") && isAudioRelatedPath(lower) { return .pluginContent }
+        if lower.contains("/audio/") && lower.contains("/application support/") { return .pluginContent }
+        if lower.contains("/packdownloads/") || lower.contains("/library/caches/") && isAudioRelatedPath(lower) {
+            return .cachesDownloads
+        }
+        if lower.contains("/sample libraries/") || lower.contains("/sample library/")
+            || lower.contains("/samples/") || lower.contains("/loops/")
+            || lower.contains("/apple loops/") || lower.contains("sample librar") {
+            return .sampleLibraries
+        }
+        if lower.contains("/sessions/") || lower.contains("/session files/")
+            || lower.contains("/daw projects/") || lower.contains("/logic projects/") {
+            return .audioProjects
+        }
+        if lower.contains("/bounces/") || lower.contains("/exports/")
+            || lower.contains("/stems/") || lower.contains("/mixes/")
+            || lower.contains("/masters/") || lower.contains("/renders/") {
+            return .audioFiles
+        }
+        if isAudioRelatedPath(lower) { return .otherAudioStorage }
+        return nil
+    }
+
+    private func applicationsTotal(in result: ScanResult) -> Int64 {
+        let folderTotal = totalSize(ofPaths: applicationFolderPaths(in: result), in: result)
+        let appItemsTotal = result.topFiles
+            .filter { $0.category == .applications }
+            .reduce(Int64(0)) { $0 + $1.size }
+        return max(folderTotal, appItemsTotal)
+    }
+
+    private func applicationFolderPaths(in result: ScanResult) -> [String] {
+        let homeApplications = "\(normalizedPath(NSHomeDirectory()))/Applications"
+        let candidates = ["/Applications", homeApplications, result.rootPath]
+        return candidates
+            .map(normalizedPath)
+            .filter { path in
+                size(ofPath: path, in: result) > 0
+                    && (path.hasSuffix("/Applications") || path == "/Applications")
+            }
+            .removingDuplicates()
+    }
+
+    private func personalProjectPaths(in result: ScanResult) -> [String] {
+        let home = normalizedPath(NSHomeDirectory())
+        let candidates = [
+            "\(home)/Projects",
+            "\(home)/Sessions",
+            "\(home)/Documents/Projects",
+            "\(home)/Documents/Sessions",
+            "\(home)/Music/Projects",
+            "\(home)/Music/Sessions",
+        ]
+        return candidates
+            .map(normalizedPath)
+            .filter { size(ofPath: $0, in: result) > 0 }
+            .removingDuplicates()
+    }
+
+    private func adjustedFolderSize(
+        _ path: String,
+        in result: ScanResult,
+        excluding excludedPaths: [String]
+    ) -> Int64 {
+        let base = size(ofPath: path, in: result)
+        guard base > 0 else { return 0 }
+        let excluded = totalSize(
+            ofPaths: excludedPaths.filter { pathContains(path, candidate: $0) },
+            in: result
+        )
+        return max(0, base - excluded)
+    }
+
+    private func totalSize(
+        ofPaths paths: [String],
+        in result: ScanResult,
+        excluding excludedPaths: [String] = []
+    ) -> Int64 {
+        let normalized = paths
+            .map(normalizedPath)
+            .filter { size(ofPath: $0, in: result) > 0 }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count < rhs.count }
+                return lhs < rhs
+            }
+
+        var selected: [String] = []
+        for path in normalized {
+            if selected.contains(where: { pathsOverlap($0, path) }) { continue }
+            selected.append(path)
+        }
+
+        let exclusions = excludedPaths.map(normalizedPath)
+        return selected.reduce(Int64(0)) { total, path in
+            let size = size(ofPath: path, in: result)
+            let excluded = totalSize(
+                ofPaths: exclusions.filter { pathContains(path, candidate: $0) },
+                in: result
+            )
+            return total + max(0, size - excluded)
+        }
+    }
+
+    private func scanRootSize(_ result: ScanResult) -> Int64 {
+        max(size(ofPath: result.rootPath, in: result), result.totalSize)
+    }
+
+    private func size(ofPath path: String, in result: ScanResult) -> Int64 {
+        let normalized = normalizedPath(path)
+        if let size = result.folderSizes[normalized] { return size }
+        if normalized == normalizedPath(result.rootPath) { return result.totalSize }
+        return 0
+    }
+
+    private func pathContains(_ path: String, candidate: String) -> Bool {
+        let parent = normalizedPath(path)
+        let child = normalizedPath(candidate)
+        if parent == "/" { return child.hasPrefix("/") }
+        return parent == child || child.hasPrefix(parent + "/")
+    }
+
+    private func pathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        pathContains(lhs, candidate: rhs) || pathContains(rhs, candidate: lhs)
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func displayName(forPath path: String) -> String {
+        let normalized = normalizedPath(path)
+        let name = URL(fileURLWithPath: normalized).lastPathComponent
+        return name.isEmpty ? "Mac Storage" : name
+    }
+
+    private func applicationDisplayName(_ name: String) -> String {
+        name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+
+    private func storageRootLabel(for result: ScanResult) -> String {
+        let root = normalizedPath(result.rootPath)
+        if root == "/" { return "Mac Storage" }
+        if root.hasPrefix("/Volumes/") {
+            let name = URL(fileURLWithPath: root).lastPathComponent
+            return name.isEmpty ? "Drive Storage" : name
+        }
+        let name = URL(fileURLWithPath: root).lastPathComponent
+        return name.isEmpty ? "Drive Storage" : name
+    }
+
+    private func sourceBasePath(_ source: StorageExplorerSource) -> String {
+        switch source {
+        case .audio(_, let basePath), .applications(let basePath),
+             .personal(_, let basePath), .otherMac(let basePath):
+            return basePath
+        }
+    }
+
+    private func sourceBaseTitle(_ source: StorageExplorerSource) -> String {
+        switch source {
+        case .audio(_, let basePath), .applications(let basePath):
+            return displayName(forPath: basePath)
+        case .personal(let folder, let basePath):
+            return folder == .other ? folder.rawValue : displayName(forPath: basePath)
+        case .otherMac:
+            return "Other Mac Storage"
+        }
+    }
+
+    private func sourceBaseIsAlreadyShown(_ source: StorageExplorerSource) -> Bool {
+        switch source {
+        case .personal(let folder, _):
+            return folder == .other
+        case .otherMac:
+            return true
+        case .audio, .applications:
+            return false
+        }
+    }
+
+    private func audioCategoryColor(_ category: StorageExplorerAudioCategory) -> Color {
+        switch category {
+        case .plugins: return .indigo
+        case .pluginContent: return .teal
+        case .presets: return .blue
+        case .sampleLibraries: return .mint
+        case .impulseResponses: return .green
+        case .audioProjects: return .purple
+        case .audioFiles: return .cyan
+        case .cachesDownloads: return .orange
+        case .otherAudioStorage: return .secondary
         }
     }
 
@@ -1142,6 +2203,90 @@ struct ContentView: View {
             "mixes",
             "omnisphere",
         ]
+    }
+
+    private func toggleAudioGuidance(for path: String) {
+        if expandedAudioGuidancePaths.contains(path) {
+            expandedAudioGuidancePaths.remove(path)
+        } else {
+            expandedAudioGuidancePaths.insert(path)
+        }
+    }
+
+    private func revealAudioFolderInFinder(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            appAlert = AppAlert(
+                title: "Folder Not Found",
+                message: "SessionSweep could not reveal this folder because it no longer exists at the scanned path. Nothing was changed."
+            )
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func copyAudioFolderPath(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+    }
+
+    private func toggleDifferentNameGroupExpansion(_ id: UUID) {
+        if expandedDifferentNameGroupIDs.contains(id) {
+            expandedDifferentNameGroupIDs.remove(id)
+        } else {
+            expandedDifferentNameGroupIDs.insert(id)
+        }
+    }
+
+    private func revealDifferentNameFileInFinder(_ path: String) {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else {
+            appAlert = AppAlert(
+                title: "File Not Found",
+                message: "This file may have been moved or removed since the scan. Run a new scan to refresh the results."
+            )
+            return
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func copyPath(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+    }
+
+    private func copyFilename(_ path: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(URL(fileURLWithPath: path).lastPathComponent, forType: .string)
+    }
+
+    private func pathContext(_ path: String, sharedParent: String?) -> String {
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        guard let sharedParent else { return path }
+        if parent == sharedParent {
+            return shortDisplayPath(parent)
+        }
+        if path.hasPrefix(sharedParent + "/") {
+            return String(path.dropFirst(sharedParent.count + 1))
+        }
+        return path
+    }
+
+    private func shortDisplayPath(_ path: String) -> String {
+        let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
+        if normalized == home { return "~" }
+        if normalized.hasPrefix(home + "/") {
+            return "~/" + String(normalized.dropFirst(home.count + 1))
+        }
+
+        let components = normalized.split(separator: "/").map(String.init)
+        guard components.count > 3 else { return normalized }
+        return components.suffix(3).joined(separator: "/")
     }
 
     private func resetDuplicateSelection() {
