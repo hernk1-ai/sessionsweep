@@ -223,6 +223,13 @@ private struct StorageExplorerNode: Identifiable {
     let route: StorageExplorerRoute?
 }
 
+private struct ApplicationExplorerItem: Identifiable {
+    let node: StorageExplorerNode
+    let classification: ApplicationClassification
+
+    var id: String { node.id }
+}
+
 private struct StorageExplorerContributor: Identifiable {
     let id: String
     let title: String
@@ -1545,23 +1552,31 @@ struct ContentView: View {
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 }
                 storageExplorerBreadcrumbs(route, result: result)
-                VStack(spacing: 12) {
-                    ForEach(nodes) { storageExplorerRow($0, parentTotal: parentTotal) }
-                    expandableResultListToggle(
-                        listID: listID,
-                        hiddenCount: hiddenNodeCount,
-                        itemSingular: itemNames.singular,
-                        itemPlural: itemNames.plural,
-                        expandedLabel: "Hide additional \(itemNames.plural)",
-                        accessibilityCollapsedLabel: "Show \(hiddenNodeCount) more storage explorer \(itemNames.singular)\(hiddenNodeCount == 1 ? "" : "s")",
-                        accessibilityExpandedLabel: "Hide additional storage explorer \(itemNames.plural)"
+                if case .applications = route {
+                    applicationsExplorerContent(
+                        nodes: allNodes,
+                        parentTotal: parentTotal,
+                        residual: residual
                     )
-                    if let residual, residual.size >= 1_048_576 {
-                        residualRow(residual.size, parentTotal: parentTotal, title: residual.title)
-                    }
-                    if allNodes.isEmpty && (residual?.size ?? 0) < 1_048_576 {
-                        Text(storageExplorerEmptyMessage(for: route))
-                            .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 12) {
+                        ForEach(nodes) { storageExplorerRow($0, parentTotal: parentTotal) }
+                        expandableResultListToggle(
+                            listID: listID,
+                            hiddenCount: hiddenNodeCount,
+                            itemSingular: itemNames.singular,
+                            itemPlural: itemNames.plural,
+                            expandedLabel: "Hide additional \(itemNames.plural)",
+                            accessibilityCollapsedLabel: "Show \(hiddenNodeCount) more storage explorer \(itemNames.singular)\(hiddenNodeCount == 1 ? "" : "s")",
+                            accessibilityExpandedLabel: "Hide additional storage explorer \(itemNames.plural)"
+                        )
+                        if let residual, residual.size >= 1_048_576 {
+                            residualRow(residual.size, parentTotal: parentTotal, title: residual.title)
+                        }
+                        if allNodes.isEmpty && (residual?.size ?? 0) < 1_048_576 {
+                            Text(storageExplorerEmptyMessage(for: route))
+                                .font(.callout).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -1590,6 +1605,218 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func applicationsExplorerContent(
+        nodes: [StorageExplorerNode],
+        parentTotal: Int64,
+        residual: (title: String, size: Int64)?
+    ) -> some View {
+        let items = classifiedApplicationItems(from: nodes)
+        let audioApplications = items.filter { $0.classification.isAudioApplication }
+        let otherApplications = items.filter { !$0.classification.isAudioApplication }
+        let audioListID = "storage-explorer-applications-audio"
+        let otherListID = "storage-explorer-applications-other"
+        let compactCount = 12
+        let visibleAudioApplications = visibleResultItems(
+            audioApplications,
+            compactCount: compactCount,
+            listID: audioListID
+        )
+        let visibleOtherApplications = visibleResultItems(
+            otherApplications,
+            compactCount: compactCount,
+            listID: otherListID
+        )
+        let hiddenAudioCount = hiddenResultItemCount(audioApplications, compactCount: compactCount)
+        let hiddenOtherCount = hiddenResultItemCount(otherApplications, compactCount: compactCount)
+
+        return VStack(alignment: .leading, spacing: 16) {
+            Text("Large applications are shown for awareness only. SessionSweep does not recommend removing installed applications. This view helps explain where storage is being used across your Mac.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            applicationGroup(
+                title: "Audio Applications",
+                description: "Applications used for music production, recording, editing, mixing, mastering, or audio restoration.",
+                emptyMessage: "No audio applications were found in this scan.",
+                applications: visibleAudioApplications,
+                parentTotal: parentTotal,
+                listID: audioListID,
+                hiddenCount: hiddenAudioCount
+            )
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                applicationGroupHeader(
+                    title: "Other Large Applications",
+                    description: "Large applications that are not classified as audio production software."
+                )
+                if visibleOtherApplications.isEmpty {
+                    Text("No other large applications were found in this scan.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(visibleOtherApplications) { item in
+                        applicationExplorerRow(item, parentTotal: parentTotal)
+                    }
+                }
+                expandableResultListToggle(
+                    listID: otherListID,
+                    hiddenCount: hiddenOtherCount,
+                    itemSingular: "application",
+                    itemPlural: "applications",
+                    expandedLabel: "Hide additional applications",
+                    accessibilityCollapsedLabel: "Show \(hiddenOtherCount) more other large application\(hiddenOtherCount == 1 ? "" : "s")",
+                    accessibilityExpandedLabel: "Hide additional other large applications"
+                )
+                if let residual, residual.size >= 1_048_576 {
+                    applicationResidualRow(residual.size, parentTotal: parentTotal)
+                }
+            }
+        }
+    }
+
+    private func applicationGroup(
+        title: String,
+        description: String,
+        emptyMessage: String,
+        applications: [ApplicationExplorerItem],
+        parentTotal: Int64,
+        listID: String,
+        hiddenCount: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            applicationGroupHeader(title: title, description: description)
+            if applications.isEmpty {
+                Text(emptyMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(applications) { item in
+                    applicationExplorerRow(item, parentTotal: parentTotal)
+                }
+            }
+            expandableResultListToggle(
+                listID: listID,
+                hiddenCount: hiddenCount,
+                itemSingular: "application",
+                itemPlural: "applications",
+                expandedLabel: "Hide additional applications",
+                accessibilityCollapsedLabel: "Show \(hiddenCount) more \(title.lowercased()) application\(hiddenCount == 1 ? "" : "s")",
+                accessibilityExpandedLabel: "Hide additional \(title.lowercased()) applications"
+            )
+        }
+    }
+
+    private func applicationGroupHeader(title: String, description: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func applicationExplorerRow(
+        _ item: ApplicationExplorerItem,
+        parentTotal: Int64
+    ) -> some View {
+        let node = item.node
+        let pct = Int((Double(node.size) / Double(max(parentTotal, 1)) * 100).rounded())
+        let drillable = node.route != nil
+
+        return Button {
+            if let route = node.route { storageExplorerRoute = route }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: node.iconName)
+                    .foregroundStyle(node.color)
+                    .font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(node.title)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(item.classification.displayTitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if let path = node.path {
+                        Text(path)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                if drillable {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Text("\(pct)%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+                Text(human(node.size))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 88, alignment: .trailing)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!drillable)
+    }
+
+    private func applicationResidualRow(_ residual: Int64, parentTotal: Int64) -> some View {
+        let pct = Int((Double(residual) / Double(max(parentTotal, 1)) * 100).rounded())
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "square.grid.2x2")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Other applications and supporting files")
+                    .foregroundStyle(.secondary)
+                Text("Additional installed applications and smaller supporting items not listed individually.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Text("\(pct)%")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+            Text(human(residual))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 88, alignment: .trailing)
+        }
+    }
+
+    private func classifiedApplicationItems(from nodes: [StorageExplorerNode]) -> [ApplicationExplorerItem] {
+        nodes
+            .compactMap { node -> ApplicationExplorerItem? in
+                guard let path = node.path else { return nil }
+                let classification = ApplicationClassifier.classify(
+                    displayName: node.title,
+                    path: path
+                )
+                return ApplicationExplorerItem(node: node, classification: classification)
+            }
+            .sorted { lhs, rhs in
+                let lhsKnown = lhs.node.size > 0
+                let rhsKnown = rhs.node.size > 0
+                if lhsKnown != rhsKnown { return lhsKnown }
+                if lhsKnown && rhsKnown && lhs.node.size != rhs.node.size {
+                    return lhs.node.size > rhs.node.size
+                }
+                return lhs.node.title.localizedStandardCompare(rhs.node.title) == .orderedAscending
+            }
     }
 
     private func storageExplorerRow(_ node: StorageExplorerNode, parentTotal: Int64) -> some View {
@@ -1744,7 +1971,7 @@ struct ContentView: View {
 
         switch route {
         case .applications:
-            return ("Other applications and smaller app items", residual)
+            return ("Other applications and supporting files", residual)
         case .rawFolder:
             return ("Files & smaller items here", residual)
         default:
@@ -2014,14 +2241,19 @@ struct ContentView: View {
 
         if !appItems.isEmpty {
             return appItems.map { item in
-                StorageExplorerNode(
+                let title = applicationDisplayName(item.displayName)
+                let classification = ApplicationClassifier.classify(
+                    displayName: title,
+                    path: item.url.path
+                )
+                return StorageExplorerNode(
                     id: "app-\(item.url.path)",
-                    title: applicationDisplayName(item.displayName),
-                    subtitle: "Installed application",
+                    title: title,
+                    subtitle: classification.displayTitle,
                     path: item.url.path,
                     size: item.size,
                     iconName: "app.fill",
-                    color: isAudioApplication(item) ? .teal : .brown,
+                    color: classification.isAudioApplication ? .teal : .brown,
                     route: controller.hasChildren(item.url.path)
                         ? .rawFolder(path: item.url.path, source: .applications(basePath: item.url.path))
                         : nil
@@ -2513,9 +2745,10 @@ struct ContentView: View {
 
     private func isAudioApplication(_ item: SizedItem) -> Bool {
         guard item.category == .applications else { return false }
-        return audioApplicationMarkers.contains { marker in
-            item.displayName.lowercased().contains(marker)
-        }
+        return ApplicationClassifier.classify(
+            displayName: applicationDisplayName(item.displayName),
+            path: item.url.path
+        ).isAudioApplication
     }
 
     private func isAudioRelatedPath(_ path: String) -> Bool {
@@ -2529,28 +2762,6 @@ struct ContentView: View {
         return audioAssetPathMarkers.contains { marker in
             lowerPath.contains(marker)
         }
-    }
-
-    private var audioApplicationMarkers: [String] {
-        [
-            "ableton live",
-            "bitwig",
-            "cubase",
-            "digital performer",
-            "fl studio",
-            "garageband",
-            "kontakt",
-            "komplete kontrol",
-            "logic pro",
-            "luna",
-            "mainstage",
-            "maschine",
-            "nuendo",
-            "pro tools",
-            "reason",
-            "reaper",
-            "studio one",
-        ]
     }
 
     private var audioAssetPathMarkers: [String] {
