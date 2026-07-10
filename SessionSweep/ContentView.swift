@@ -1160,30 +1160,16 @@ struct ContentView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .trailing)
-            Button {
-                revealDifferentNameFileInFinder(path)
+            Menu {
+                Button("Reveal in Finder") { revealDifferentNameFileInFinder(path) }
+                Button("Copy Path") { copyPath(path) }
+                Button("Copy Filename") { copyFilename(path) }
             } label: {
-                Label("Reveal in Finder", systemImage: "magnifyingglass")
+                Image(systemName: "ellipsis.circle")
             }
-            .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
-            .help("Reveal in Finder")
-            Button {
-                copyPath(path)
-            } label: {
-                Label("Copy Path", systemImage: "doc.on.doc")
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
-            .help("Copy Path")
-            Button {
-                copyFilename(path)
-            } label: {
-                Label("Copy Filename", systemImage: "textformat")
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
-            .help("Copy Filename")
+            .menuStyle(.button)
+            .help("File actions")
         }
         .padding(.vertical, 2)
         .contextMenu {
