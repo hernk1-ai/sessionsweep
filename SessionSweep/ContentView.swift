@@ -872,13 +872,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .help(item.safetyStatus.explanatoryCopy)
                     .accessibilityLabel(item.safetyStatus.explanatoryCopy)
-                keepSafeButton(
-                    path: item.path,
-                    itemType: .folder,
-                    size: item.size,
-                    classification: guidance.displayTitle,
-                    category: item.category.rawValue
-                )
                 Button {
                     toggleAudioGuidance(for: item.path)
                 } label: {
@@ -1856,15 +1849,6 @@ struct ContentView: View {
                     Text(human(node.size))
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                         .frame(width: 88, alignment: .trailing)
-                    if let path = node.path {
-                        keepSafeButton(
-                            path: path,
-                            itemType: nil,
-                            size: node.size,
-                            classification: node.subtitle,
-                            category: node.title
-                        )
-                    }
                 }
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
@@ -2683,13 +2667,6 @@ struct ContentView: View {
             }
             Text(human(item.size))
                 .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-            keepSafeButton(
-                path: item.url.path,
-                itemType: nil,
-                size: item.size,
-                classification: item.category?.displayName,
-                category: item.category?.displayName
-            )
         }
     }
 
