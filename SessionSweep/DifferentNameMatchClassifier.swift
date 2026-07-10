@@ -6,7 +6,7 @@ enum DifferentNameMatchKind: String, Sendable, Hashable {
     case possibleAlternateVersions = "Possible Alternate Versions"
     case possibleSilentFiles = "Possible Silent / Empty Files"
     case repeatedExportCopies = "Repeated Export Copies"
-    case unclear = "Unclear Match"
+    case unclear = "Needs Review"
 }
 
 enum DifferentNameMatchConfidence: String, Sendable, Hashable {
