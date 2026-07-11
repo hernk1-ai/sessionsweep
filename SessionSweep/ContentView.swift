@@ -246,9 +246,1149 @@ private struct StorageExplorerBreadcrumb: Identifiable {
     let route: StorageExplorerRoute
 }
 
+private struct CategoryPresentationRow {
+    let category: Category
+    let size: Int64
+}
+
+private struct AudioCategoryPresentationRow {
+    let category: AudioSystemDataCategory
+    let size: Int64
+}
+
+private struct AudioFolderPresentationRow: Identifiable {
+    let item: AudioSystemDataItem
+    let guidance: AudioFolderGuidance
+
+    var id: String { item.path }
+}
+
+private struct DuplicatePathPresentationRow: Identifiable {
+    let path: String
+    let fileSize: Int64
+    let isKeeper: Bool
+    let safetyClassification: DuplicateSafetyClassification
+    let keepSafeItem: KeepSafeItem?
+
+    var id: String { path }
+    var isNeverRecommend: Bool { safetyClassification.isNeverRecommend }
+    var isKeepSafe: Bool { keepSafeItem != nil }
+    var isStageable: Bool { !isNeverRecommend && !isKeepSafe }
+}
+
+private struct DuplicateGroupPresentationRow: Identifiable {
+    let group: DuplicateGroup
+    let keeper: String?
+    let actionableBytes: Int64
+    let paths: [DuplicatePathPresentationRow]
+
+    var id: DuplicateGroup.ID { group.id }
+}
+
+private struct IdenticalContentGroupPresentation: Identifiable {
+    let group: DuplicateGroup
+    let classification: DifferentNameMatchClassification
+    let sharedParent: String?
+
+    var id: DuplicateGroup.ID { group.id }
+    var representedStorageBytes: Int64 { group.fileSize * Int64(group.count) }
+    var largestFileBytes: Int64 { group.fileSize }
+    var filename: String { group.displayName }
+}
+
+private struct InstallerPresentationRow: Identifiable {
+    let item: SizedItem
+    let path: String
+    let displayName: String
+    let parentPath: String
+    let isKeepSafe: Bool
+    let alreadyInstalled: Bool
+
+    var id: String { path }
+    var isStageable: Bool { !isKeepSafe }
+}
+
+private struct RawStorageChild {
+    let path: String
+    let title: String
+    let size: Int64
+    let hasChildren: Bool
+}
+
+private struct StorageExplorerRoutePresentation {
+    let route: StorageExplorerRoute
+    let nodes: [StorageExplorerNode]
+    let total: Int64
+    let residual: (title: String, size: Int64)?
+    let breadcrumbs: [StorageExplorerBreadcrumb]
+}
+
+private struct ResultsPresentationModel {
+    let identity: String
+    let totalSize: Int64
+    let keepSafeIndex: KeepSafeIndex
+    let recommendations: [StorageRecommendation]
+    let categoryRows: [CategoryPresentationRow]
+    let audioCategoryRows: [AudioCategoryPresentationRow]
+    let topAudioFolders: [AudioFolderPresentationRow]
+    let detectedAudioFolders: [AudioFolderPresentationRow]
+    let firstRelocationCandidatePath: String?
+    let duplicateGroups: [DuplicateGroupPresentationRow]
+    let duplicateActionableTotal: Int64
+    let duplicateStageablePaths: Set<String>
+    let duplicatePathSizes: [String: Int64]
+    let recommendedDuplicateSelection: Set<String>
+    let identicalContentGroups: [IdenticalContentGroupPresentation]
+    let installerRows: [InstallerPresentationRow]
+    let stageableInstallerRows: [InstallerPresentationRow]
+    let installerActionableTotal: Int64
+    let installerStageablePaths: Set<String>
+    let installerPathSizes: [String: Int64]
+    let largestAudioAssets: [SizedItem]
+    let otherLargeApplications: [SizedItem]
+    let sortedKeepSafeItems: [KeepSafeItem]
+    private let result: ScanResult
+    private let audioContributors: [StorageExplorerContributor]
+    private let rawChildrenByPath: [String: [RawStorageChild]]
+
+    static func build(
+        result: ScanResult,
+        keepSafeItems: [KeepSafeItem],
+        identity: String
+    ) -> ResultsPresentationModel {
+        var timer = ResultsPerformanceTimer()
+
+        let keepSafeIndex = KeepSafeIndex(items: keepSafeItems)
+        timer.mark("Keep Safe index")
+
+        let recommendations = StorageRecommendationEngine.recommendations(
+            for: result,
+            protectedItems: keepSafeItems
+        )
+        timer.mark("Recommendations")
+
+        let categoryRows = Category.allCases
+            .map { CategoryPresentationRow(category: $0, size: result.categoryTotals[$0] ?? 0) }
+            .filter { $0.size > 0 }
+            .sorted { $0.size > $1.size }
+        timer.mark("Storage chart rows")
+
+        let audioCategoryRows = AudioSystemDataCategory.allCases
+            .map { AudioCategoryPresentationRow(category: $0, size: result.audioSystemData.categoryTotals[$0] ?? 0) }
+        let audioRowsByPath = Dictionary(uniqueKeysWithValues: result.audioSystemData.items.map { item in
+            (item.path, AudioFolderPresentationRow(
+                item: item,
+                guidance: AudioFolderGuidanceClassifier.guidance(for: item)
+            ))
+        })
+        let topAudioFolders = result.audioSystemData.topFolders.compactMap { audioRowsByPath[$0.path] }
+        let detectedAudioFolders = result.audioSystemData.items.compactMap { audioRowsByPath[$0.path] }
+        let firstRelocationCandidatePath = detectedAudioFolders
+            .filter {
+                $0.guidance.vendorRelocationMayBePossible
+                    && !$0.guidance.expectedToRemainInPlace
+            }
+            .sorted { lhs, rhs in
+                let lhsRank = relocationSupportSortRank(lhs.guidance.relocationSupport)
+                let rhsRank = relocationSupportSortRank(rhs.guidance.relocationSupport)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                if lhs.item.size != rhs.item.size { return lhs.item.size > rhs.item.size }
+                return lhs.item.friendlyName.localizedStandardCompare(rhs.item.friendlyName) == .orderedAscending
+            }
+            .first?.item.path
+        timer.mark("Audio guidance")
+
+        let duplicateGroups = result.duplicateGroups.map { group -> DuplicateGroupPresentationRow in
+            let keeper = recommendedKeeper(in: group)
+            let pathRows = group.paths.map { path in
+                DuplicatePathPresentationRow(
+                    path: path,
+                    fileSize: group.fileSize,
+                    isKeeper: path == keeper,
+                    safetyClassification: DuplicateSafetyClassifier.classify(path: path),
+                    keepSafeItem: keepSafeIndex.item(for: path)
+                )
+            }
+            let actionableCount = pathRows.filter { !$0.isKeeper && $0.isStageable }.count
+            return DuplicateGroupPresentationRow(
+                group: group,
+                keeper: keeper,
+                actionableBytes: Int64(actionableCount) * group.fileSize,
+                paths: pathRows
+            )
+        }
+        let duplicateStageablePaths = Set(duplicateGroups.flatMap { $0.paths.filter(\.isStageable).map(\.path) })
+        let duplicatePathSizes = Dictionary(uniqueKeysWithValues: duplicateGroups.flatMap { group in
+            group.paths.map { ($0.path, $0.fileSize) }
+        })
+        let recommendedDuplicateSelection = Set(duplicateGroups.flatMap { group in
+            group.paths.filter { !$0.isKeeper && $0.isStageable }.map(\.path)
+        })
+        let duplicateActionableTotal = duplicateGroups.reduce(Int64(0)) { $0 + $1.actionableBytes }
+        timer.mark("Duplicate presentation")
+
+        let identicalContentGroups = sortedIdenticalContentGroups(result.identicalContentGroups)
+        timer.mark("Identical-content classification")
+
+        let installerRows = result.installerFiles
+            .sorted { $0.size > $1.size }
+            .map { item in
+                let path = item.url.path
+                return InstallerPresentationRow(
+                    item: item,
+                    path: path,
+                    displayName: item.displayName,
+                    parentPath: item.parentPath,
+                    isKeepSafe: keepSafeIndex.isProtected(path),
+                    alreadyInstalled: InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
+                )
+            }
+        let stageableInstallerRows = installerRows.filter(\.isStageable)
+        let installerActionableTotal = stageableInstallerRows.reduce(Int64(0)) { $0 + $1.item.size }
+        let installerStageablePaths = Set(stageableInstallerRows.map(\.path))
+        let installerPathSizes = Dictionary(uniqueKeysWithValues: installerRows.map { ($0.path, $0.item.size) })
+        timer.mark("Installer presentation")
+
+        let largestAudioAssets = Self.largestAudioAssets(in: result)
+        let otherLargeApplications = Self.otherLargeApplications(in: result)
+        timer.mark("Largest assets")
+
+        let audioContributors = audioProductionContributors(in: result)
+        let rawChildrenByPath = Self.rawChildrenByPath(in: result)
+        timer.mark("Storage Explorer base cache")
+
+        let sortedKeepSafeItems = keepSafeItems.sorted { lhs, rhs in
+            let lhsKnown = lhs.sizeAtProtection > 0
+            let rhsKnown = rhs.sizeAtProtection > 0
+            if lhsKnown != rhsKnown { return lhsKnown }
+            if lhsKnown && rhsKnown && lhs.sizeAtProtection != rhs.sizeAtProtection {
+                return lhs.sizeAtProtection > rhs.sizeAtProtection
+            }
+            if lhs.dateProtected != rhs.dateProtected {
+                return lhs.dateProtected > rhs.dateProtected
+            }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+        }
+        timer.mark("Protected item sorting")
+
+        timer.finish("Results presentation model")
+
+        return ResultsPresentationModel(
+            identity: identity,
+            totalSize: result.totalSize,
+            keepSafeIndex: keepSafeIndex,
+            recommendations: recommendations,
+            categoryRows: categoryRows,
+            audioCategoryRows: audioCategoryRows,
+            topAudioFolders: topAudioFolders,
+            detectedAudioFolders: detectedAudioFolders,
+            firstRelocationCandidatePath: firstRelocationCandidatePath,
+            duplicateGroups: duplicateGroups,
+            duplicateActionableTotal: duplicateActionableTotal,
+            duplicateStageablePaths: duplicateStageablePaths,
+            duplicatePathSizes: duplicatePathSizes,
+            recommendedDuplicateSelection: recommendedDuplicateSelection,
+            identicalContentGroups: identicalContentGroups,
+            installerRows: installerRows,
+            stageableInstallerRows: stageableInstallerRows,
+            installerActionableTotal: installerActionableTotal,
+            installerStageablePaths: installerStageablePaths,
+            installerPathSizes: installerPathSizes,
+            largestAudioAssets: largestAudioAssets,
+            otherLargeApplications: otherLargeApplications,
+            sortedKeepSafeItems: sortedKeepSafeItems,
+            result: result,
+            audioContributors: audioContributors,
+            rawChildrenByPath: rawChildrenByPath
+        )
+    }
+}
+
+private extension ResultsPresentationModel {
+    func routePresentation(for route: StorageExplorerRoute) -> StorageExplorerRoutePresentation {
+        let normalizedRoute = normalizedStorageExplorerRoute(route)
+        let nodes = storageExplorerNodes(for: normalizedRoute)
+        let total = max(storageExplorerTotal(for: normalizedRoute, nodes: nodes), 1)
+        return StorageExplorerRoutePresentation(
+            route: normalizedRoute,
+            nodes: nodes,
+            total: total,
+            residual: storageExplorerResidual(for: normalizedRoute, nodes: nodes, parentTotal: total),
+            breadcrumbs: storageExplorerBreadcrumbItems(for: normalizedRoute)
+        )
+    }
+
+    private static func relocationSupportSortRank(_ support: RelocationSupport) -> Int {
+        switch support {
+        case .officialSupported: return 0
+        case .vendorToolRequired: return 1
+        case .manualPossible: return 2
+        case .reviewFirst: return 3
+        case .unknown: return 4
+        case .leaveInPlace: return 5
+        }
+    }
+
+    private static func recommendedKeeper(in group: DuplicateGroup) -> String? {
+        group.paths.max { lhs, rhs in
+            isBetterKeeper(rhs, than: lhs)
+        }
+    }
+
+    private static func isBetterKeeper(_ lhs: String, than rhs: String) -> Bool {
+        let lhsScore = locationScore(for: lhs)
+        let rhsScore = locationScore(for: rhs)
+        if lhsScore != rhsScore { return lhsScore > rhsScore }
+
+        let lhsModified = modificationDate(for: lhs)
+        let rhsModified = modificationDate(for: rhs)
+        if lhsModified != rhsModified { return lhsModified > rhsModified }
+
+        let lhsDepth = lhs.split(separator: "/").count
+        let rhsDepth = rhs.split(separator: "/").count
+        if lhsDepth != rhsDepth { return lhsDepth < rhsDepth }
+
+        return lhs.localizedStandardCompare(rhs) == .orderedAscending
+    }
+
+    private static func locationScore(for path: String) -> Int {
+        let lower = path.lowercased()
+        var score = 10
+        if lower.contains("/music/") || lower.contains("/documents/")
+            || lower.contains("/projects/") || lower.contains("/sessions/") {
+            score += 8
+        }
+        if lower.contains("/downloads/") || lower.contains("/desktop/")
+            || lower.contains("/trash/") || lower.contains("/caches/")
+            || lower.contains("/tmp/") || lower.contains("/temp/")
+            || lower.contains("backup") || lower.contains(" copy") {
+            score -= 8
+        }
+        return score
+    }
+
+    private static func modificationDate(for path: String) -> TimeInterval {
+        let url = URL(fileURLWithPath: path)
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+    }
+
+    private static func sortedIdenticalContentGroups(
+        _ groups: [DuplicateGroup]
+    ) -> [IdenticalContentGroupPresentation] {
+        groups
+            .map { group in
+                IdenticalContentGroupPresentation(
+                    group: group,
+                    classification: DifferentNameMatchClassifier.classify(
+                        paths: group.paths,
+                        fileSize: group.fileSize
+                    ),
+                    sharedParent: DifferentNameMatchClassifier.sharedParent(paths: group.paths)
+                )
+            }
+            .sorted { lhs, rhs in
+                let lhsCategory = identicalContentCategorySortRank(lhs.classification.kind)
+                let rhsCategory = identicalContentCategorySortRank(rhs.classification.kind)
+                if lhsCategory != rhsCategory { return lhsCategory < rhsCategory }
+                if lhs.representedStorageBytes != rhs.representedStorageBytes {
+                    return lhs.representedStorageBytes > rhs.representedStorageBytes
+                }
+                if lhs.largestFileBytes != rhs.largestFileBytes {
+                    return lhs.largestFileBytes > rhs.largestFileBytes
+                }
+                return lhs.filename.localizedStandardCompare(rhs.filename) == .orderedAscending
+            }
+    }
+
+    private static func identicalContentCategorySortRank(_ kind: DifferentNameMatchKind) -> Int {
+        switch kind {
+        case .repeatedExportCopies: return 0
+        case .possibleAlternateVersions: return 1
+        case .possibleDuplicateTracks: return 2
+        case .unclear: return 3
+        case .likelyConsolidatedStems: return 4
+        case .possibleSilentFiles: return 5
+        }
+    }
+
+    private static func rawChildrenByPath(in result: ScanResult) -> [String: [RawStorageChild]] {
+        result.folderChildren.mapValues { paths in
+            paths
+                .map { path in
+                    RawStorageChild(
+                        path: path,
+                        title: displayName(forPath: path),
+                        size: result.folderSizes[path] ?? 0,
+                        hasChildren: !(result.folderChildren[path]?.isEmpty ?? true)
+                    )
+                }
+                .sorted { $0.size > $1.size }
+        }
+    }
+
+    private func normalizedStorageExplorerRoute(_ route: StorageExplorerRoute) -> StorageExplorerRoute {
+        switch route {
+        case .rawFolder(let path, _):
+            return size(ofPath: path) > 0 ? route : .root
+        default:
+            return route
+        }
+    }
+
+    private func storageExplorerNodes(for route: StorageExplorerRoute) -> [StorageExplorerNode] {
+        switch route {
+        case .root:
+            return storageExplorerRootNodes()
+        case .audioProduction:
+            return audioProductionCategoryNodes()
+        case .audioCategory(let category):
+            return audioProductionContributorNodes(for: category)
+        case .applications:
+            return applicationExplorerNodes()
+        case .personalFiles:
+            return personalExplorerNodes()
+        case .rawFolder(let path, let source):
+            return rawFolderExplorerNodes(path: path, source: source)
+        }
+    }
+
+    private func storageExplorerTotal(for route: StorageExplorerRoute, nodes: [StorageExplorerNode]) -> Int64 {
+        switch route {
+        case .root:
+            return max(scanRootSize, nodes.reduce(Int64(0)) { $0 + $1.size })
+        case .audioProduction, .audioCategory, .personalFiles:
+            return nodes.reduce(Int64(0)) { $0 + $1.size }
+        case .applications:
+            return max(applicationsTotal, nodes.reduce(Int64(0)) { $0 + $1.size })
+        case .rawFolder(let path, _):
+            return size(ofPath: path)
+        }
+    }
+
+    private func storageExplorerResidual(
+        for route: StorageExplorerRoute,
+        nodes: [StorageExplorerNode],
+        parentTotal: Int64
+    ) -> (title: String, size: Int64)? {
+        let shownSum = nodes.reduce(Int64(0)) { $0 + $1.size }
+        let residual = max(0, parentTotal - shownSum)
+        guard residual >= 1_048_576 else { return nil }
+        switch route {
+        case .applications:
+            return ("Other applications and supporting files", residual)
+        default:
+            return ("Files & smaller items here", residual)
+        }
+    }
+
+    private func storageExplorerRootNodes() -> [StorageExplorerNode] {
+        let audioTotal = audioProductionTotal
+        let appsTotal = applicationsTotal
+        let personalTotal = personalExplorerNodes().reduce(Int64(0)) { $0 + $1.size }
+        let otherTotal = max(0, scanRootSize - audioTotal - appsTotal - personalTotal)
+
+        var nodes: [StorageExplorerNode] = []
+        if audioTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "audio-production",
+                title: "Audio Production",
+                subtitle: "Plugins, presets, sample libraries, audio support files, and production content.",
+                path: nil,
+                size: audioTotal,
+                iconName: "waveform",
+                color: .teal,
+                route: .audioProduction
+            ))
+        }
+        if appsTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "applications",
+                title: "Applications",
+                subtitle: "Installed apps and their storage usage.",
+                path: nil,
+                size: appsTotal,
+                iconName: "app.fill",
+                color: .brown,
+                route: .applications
+            ))
+        }
+        if personalTotal > 0 {
+            nodes.append(StorageExplorerNode(
+                id: "personal-files",
+                title: "Personal Files",
+                subtitle: "Projects, documents, downloads, desktop files, and other user-created content.",
+                path: nil,
+                size: personalTotal,
+                iconName: "person.crop.square.fill",
+                color: .cyan,
+                route: .personalFiles
+            ))
+        }
+        if otherTotal >= 1_048_576 {
+            let source = StorageExplorerSource.otherMac(basePath: result.rootPath)
+            nodes.append(StorageExplorerNode(
+                id: "other-mac-storage",
+                title: "Other Mac Storage",
+                subtitle: "Scanned storage that does not fit the studio, app, or personal groups.",
+                path: nil,
+                size: otherTotal,
+                iconName: "internaldrive.fill",
+                color: .secondary,
+                route: .rawFolder(path: result.rootPath, source: source)
+            ))
+        }
+        return nodes
+    }
+
+    private func audioProductionCategoryNodes() -> [StorageExplorerNode] {
+        let totals = Dictionary(grouping: audioContributors, by: \.category)
+            .mapValues { $0.reduce(Int64(0)) { $0 + $1.size } }
+        return StorageExplorerAudioCategory.allCases.compactMap { category in
+            guard let total = totals[category], total > 0 else { return nil }
+            return StorageExplorerNode(
+                id: "audio-category-\(category.rawValue)",
+                title: category.rawValue,
+                subtitle: category.description,
+                path: nil,
+                size: total,
+                iconName: category.iconName,
+                color: audioCategoryColor(category),
+                route: .audioCategory(category)
+            )
+        }
+    }
+
+    private func audioProductionContributorNodes(for category: StorageExplorerAudioCategory) -> [StorageExplorerNode] {
+        audioContributors
+            .filter { $0.category == category }
+            .sorted { $0.size > $1.size }
+            .map { contributor in
+                let source = StorageExplorerSource.audio(category, basePath: contributor.path)
+                return StorageExplorerNode(
+                    id: contributor.id,
+                    title: contributor.title,
+                    subtitle: contributor.subtitle,
+                    path: contributor.path,
+                    size: contributor.size,
+                    iconName: category.iconName,
+                    color: audioCategoryColor(category),
+                    route: hasChildren(contributor.path) ? .rawFolder(path: contributor.path, source: source) : nil
+                )
+            }
+    }
+
+    private func applicationExplorerNodes() -> [StorageExplorerNode] {
+        let appItems = result.topFiles
+            .filter { $0.category == .applications }
+            .sorted { $0.size > $1.size }
+
+        if !appItems.isEmpty {
+            return appItems.map { item in
+                let title = Self.applicationDisplayName(item.displayName)
+                let classification = ApplicationClassifier.classify(displayName: title, path: item.url.path)
+                return StorageExplorerNode(
+                    id: "app-\(item.url.path)",
+                    title: title,
+                    subtitle: classification.displayTitle,
+                    path: item.url.path,
+                    size: item.size,
+                    iconName: "app.fill",
+                    color: classification.isAudioApplication ? .teal : .brown,
+                    route: hasChildren(item.url.path)
+                        ? .rawFolder(path: item.url.path, source: .applications(basePath: item.url.path))
+                        : nil
+                )
+            }
+        }
+
+        return applicationFolderPaths.map { path in
+            StorageExplorerNode(
+                id: "app-folder-\(path)",
+                title: Self.displayName(forPath: path),
+                subtitle: "Applications folder",
+                path: path,
+                size: size(ofPath: path),
+                iconName: "folder.fill",
+                color: .brown,
+                route: .rawFolder(path: path, source: .applications(basePath: path))
+            )
+        }
+    }
+
+    private func personalExplorerNodes() -> [StorageExplorerNode] {
+        let home = normalizedPath(NSHomeDirectory())
+        let audioPaths = audioContributors.map(\.path)
+        let projectPaths = personalProjectPaths
+        let homeApplications = "\(home)/Applications"
+
+        let folderSpecs: [(StorageExplorerPersonalFolder, String, [String])] = [
+            (.desktop, "\(home)/Desktop", audioPaths),
+            (.documents, "\(home)/Documents", audioPaths + projectPaths),
+            (.downloads, "\(home)/Downloads", audioPaths),
+            (.music, "\(home)/Music", audioPaths + projectPaths),
+            (.movies, "\(home)/Movies", audioPaths),
+        ]
+
+        var nodes: [StorageExplorerNode] = folderSpecs.compactMap { spec in
+            let (folder, path, exclusions) = spec
+            let size = adjustedFolderSize(path, excluding: exclusions)
+            guard size > 0 else { return nil }
+            return personalNode(folder: folder, path: path, size: size)
+        }
+
+        let projectTotal = totalSize(ofPaths: projectPaths, excluding: audioPaths)
+        if projectTotal > 0 {
+            let routePath = projectPaths.first ?? "\(home)/Projects"
+            nodes.append(personalNode(folder: .projects, path: routePath, size: projectTotal))
+        }
+
+        let homeSize = size(ofPath: home)
+        if homeSize > 0 {
+            let namedRawPaths = folderSpecs.map { $0.1 } + projectPaths + [homeApplications]
+            let excludedTotal = totalSize(ofPaths: namedRawPaths + audioPaths)
+            let other = max(0, homeSize - excludedTotal)
+            if other >= 1_048_576 {
+                nodes.append(StorageExplorerNode(
+                    id: "personal-other",
+                    title: StorageExplorerPersonalFolder.other.rawValue,
+                    subtitle: StorageExplorerPersonalFolder.other.description,
+                    path: home,
+                    size: other,
+                    iconName: "folder.fill",
+                    color: .secondary,
+                    route: .rawFolder(path: home, source: .personal(.other, basePath: home))
+                ))
+            }
+        }
+
+        return nodes
+    }
+
+    private func rawFolderExplorerNodes(path: String, source: StorageExplorerSource) -> [StorageExplorerNode] {
+        let parentTotal = max(size(ofPath: path), 1)
+        return (rawChildrenByPath[path] ?? []).map { child in
+            let proportion = Double(child.size) / Double(parentTotal)
+            let subtitle = proportion >= 0.01
+                ? "\(Int((proportion * 100).rounded()))% of this level"
+                : "Less than 1% of this level"
+            return StorageExplorerNode(
+                id: "raw-\(child.path)",
+                title: child.title,
+                subtitle: subtitle,
+                path: child.path,
+                size: child.size,
+                iconName: "folder.fill",
+                color: .teal,
+                route: child.hasChildren ? .rawFolder(path: child.path, source: source) : nil
+            )
+        }
+    }
+
+    private func personalNode(folder: StorageExplorerPersonalFolder, path: String, size: Int64) -> StorageExplorerNode {
+        StorageExplorerNode(
+            id: "personal-\(folder.rawValue)-\(path)",
+            title: folder.rawValue,
+            subtitle: folder.description,
+            path: path,
+            size: size,
+            iconName: folder == .downloads ? "arrow.down.circle.fill" : "folder.fill",
+            color: folder == .downloads ? .orange : .cyan,
+            route: .rawFolder(path: path, source: .personal(folder, basePath: path))
+        )
+    }
+
+    private func storageExplorerBreadcrumbItems(for route: StorageExplorerRoute) -> [StorageExplorerBreadcrumb] {
+        var crumbs = [StorageExplorerBreadcrumb(id: "root", title: "Storage Explorer", route: .root)]
+        switch route {
+        case .root:
+            return crumbs
+        case .audioProduction:
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-production", title: "Audio Production", route: .audioProduction))
+        case .audioCategory(let category):
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-production", title: "Audio Production", route: .audioProduction))
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-\(category.rawValue)", title: category.rawValue, route: route))
+        case .applications:
+            crumbs.append(StorageExplorerBreadcrumb(id: "applications", title: "Applications", route: .applications))
+        case .personalFiles:
+            crumbs.append(StorageExplorerBreadcrumb(id: "personal-files", title: "Personal Files", route: .personalFiles))
+        case .rawFolder(let path, let source):
+            appendSourceBreadcrumb(source, crumbs: &crumbs)
+            appendRawPathBreadcrumbs(path: path, source: source, crumbs: &crumbs)
+        }
+        return crumbs
+    }
+
+    private func appendSourceBreadcrumb(_ source: StorageExplorerSource, crumbs: inout [StorageExplorerBreadcrumb]) {
+        switch source {
+        case .audio(let category, _):
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-production", title: "Audio Production", route: .audioProduction))
+            crumbs.append(StorageExplorerBreadcrumb(id: "audio-\(category.rawValue)", title: category.rawValue, route: .audioCategory(category)))
+        case .applications:
+            crumbs.append(StorageExplorerBreadcrumb(id: "applications", title: "Applications", route: .applications))
+        case .personal(let folder, _):
+            crumbs.append(StorageExplorerBreadcrumb(id: "personal-files", title: "Personal Files", route: .personalFiles))
+            if folder != .other {
+                crumbs.append(StorageExplorerBreadcrumb(id: "personal-\(folder.rawValue)", title: folder.rawValue, route: .rawFolder(path: sourceBasePath(source), source: source)))
+            }
+        case .otherMac:
+            crumbs.append(StorageExplorerBreadcrumb(id: "other-mac", title: "Other Mac Storage", route: .rawFolder(path: sourceBasePath(source), source: source)))
+        }
+    }
+
+    private func appendRawPathBreadcrumbs(
+        path: String,
+        source: StorageExplorerSource,
+        crumbs: inout [StorageExplorerBreadcrumb]
+    ) {
+        let base = sourceBasePath(source)
+        let baseTitle = sourceBaseTitle(source)
+        let currentPath = normalizedPath(path)
+        let normalizedBase = normalizedPath(base)
+        let baseAlreadyShown = sourceBaseIsAlreadyShown(source)
+
+        guard currentPath == normalizedBase || pathContains(normalizedBase, candidate: currentPath) else {
+            crumbs.append(StorageExplorerBreadcrumb(id: currentPath, title: Self.displayName(forPath: currentPath), route: .rawFolder(path: currentPath, source: source)))
+            return
+        }
+
+        if !baseAlreadyShown {
+            crumbs.append(StorageExplorerBreadcrumb(id: normalizedBase, title: baseTitle, route: .rawFolder(path: normalizedBase, source: source)))
+        }
+
+        guard currentPath != normalizedBase else { return }
+        let relative = normalizedBase == "/"
+            ? String(currentPath.dropFirst(1))
+            : String(currentPath.dropFirst(normalizedBase.count + 1))
+        var accumulated = normalizedBase
+        for component in relative.split(separator: "/").map(String.init) {
+            accumulated = accumulated == "/" ? "/\(component)" : "\(accumulated)/\(component)"
+            crumbs.append(StorageExplorerBreadcrumb(
+                id: accumulated,
+                title: component,
+                route: .rawFolder(path: accumulated, source: source)
+            ))
+        }
+    }
+
+    private var scanRootSize: Int64 {
+        max(result.totalSize, size(ofPath: result.rootPath))
+    }
+
+    private var audioProductionTotal: Int64 {
+        audioContributors.reduce(Int64(0)) { $0 + $1.size }
+    }
+
+    private var applicationsTotal: Int64 {
+        let folderTotal = totalSize(ofPaths: applicationFolderPaths)
+        let appItemsTotal = result.topFiles
+            .filter { $0.category == .applications }
+            .reduce(Int64(0)) { $0 + $1.size }
+        return max(folderTotal, appItemsTotal)
+    }
+
+    private var applicationFolderPaths: [String] {
+        let homeApplications = "\(normalizedPath(NSHomeDirectory()))/Applications"
+        let candidates = ["/Applications", homeApplications, result.rootPath]
+        return candidates
+            .map { Self.normalizedPath($0) }
+            .filter { path in
+                size(ofPath: path) > 0
+                    && (path.hasSuffix("/Applications") || path == "/Applications")
+            }
+            .removingDuplicates()
+    }
+
+    private var personalProjectPaths: [String] {
+        let home = normalizedPath(NSHomeDirectory())
+        let candidates = [
+            "\(home)/Projects",
+            "\(home)/Sessions",
+            "\(home)/Documents/Projects",
+            "\(home)/Documents/Sessions",
+            "\(home)/Music/Projects",
+            "\(home)/Music/Sessions",
+        ]
+        return candidates
+            .map { Self.normalizedPath($0) }
+            .filter { size(ofPath: $0) > 0 }
+            .removingDuplicates()
+    }
+
+    private static func audioProductionContributors(in result: ScanResult) -> [StorageExplorerContributor] {
+        var candidates: [StorageExplorerContributor] = []
+
+        for item in result.audioSystemData.items {
+            candidates.append(StorageExplorerContributor(
+                id: "audio-system-\(item.path)",
+                title: item.friendlyName,
+                subtitle: item.category.rawValue,
+                path: item.path,
+                size: item.size,
+                category: audioCategory(for: item.category),
+                priority: 100
+            ))
+        }
+
+        for (path, size) in result.folderSizes where size >= 1_048_576 {
+            let normalized = normalizedPath(path)
+            guard AudioSystemDataClassifier.classify(path: normalized) == nil,
+                  let category = audioCategory(forFolderPath: normalized) else { continue }
+            candidates.append(StorageExplorerContributor(
+                id: "audio-folder-\(normalized)",
+                title: displayName(forPath: normalized),
+                subtitle: category.rawValue,
+                path: normalized,
+                size: size,
+                category: category,
+                priority: 70
+            ))
+        }
+
+        for item in result.topFiles where item.category != .applications && isAudioAsset(item) {
+            let path = normalizedPath(item.url.path)
+            guard let category = audioCategory(for: item) else { continue }
+            candidates.append(StorageExplorerContributor(
+                id: "audio-item-\(path)",
+                title: item.displayName,
+                subtitle: item.category?.displayName ?? category.rawValue,
+                path: path,
+                size: item.size,
+                category: category,
+                priority: 40
+            ))
+        }
+
+        return nonOverlappingContributors(candidates)
+    }
+
+    private static func nonOverlappingContributors(
+        _ candidates: [StorageExplorerContributor]
+    ) -> [StorageExplorerContributor] {
+        let sorted = candidates.sorted { lhs, rhs in
+            if lhs.priority != rhs.priority { return lhs.priority > rhs.priority }
+            if lhs.size != rhs.size { return lhs.size > rhs.size }
+            return lhs.path < rhs.path
+        }
+
+        var selected: [StorageExplorerContributor] = []
+        for candidate in sorted {
+            if selected.contains(where: { pathsOverlap($0.path, candidate.path) }) { continue }
+            selected.append(candidate)
+        }
+        return selected
+    }
+
+    private static func largestAudioAssets(in result: ScanResult) -> [SizedItem] {
+        result.topFiles
+            .filter { Self.isAudioAsset($0) }
+            .sorted { lhs, rhs in
+                if lhs.size != rhs.size { return lhs.size > rhs.size }
+                return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+            }
+    }
+
+    private static func otherLargeApplications(in result: ScanResult) -> [SizedItem] {
+        result.topFiles
+            .filter { item in
+                guard item.category == .applications else { return false }
+                return !isAudioApplication(item)
+            }
+            .sorted { $0.size > $1.size }
+    }
+
+    private static func isAudioAsset(_ item: SizedItem) -> Bool {
+        if item.category == .applications { return isAudioApplication(item) }
+        guard let category = item.category else { return isAudioRelatedPath(item.url.path) }
+        switch category {
+        case .projects, .plugins, .pluginData, .sampleLibraries, .audioFiles, .installers, .archives:
+            return true
+        case .media, .other:
+            return isAudioRelatedPath(item.url.path)
+        case .applications:
+            return isAudioApplication(item)
+        }
+    }
+
+    private static func isAudioApplication(_ item: SizedItem) -> Bool {
+        guard item.category == .applications else { return false }
+        return ApplicationClassifier.classify(
+            displayName: applicationDisplayName(item.displayName),
+            path: item.url.path
+        ).isAudioApplication
+    }
+
+    private static func audioCategory(for category: AudioSystemDataCategory) -> StorageExplorerAudioCategory {
+        switch category {
+        case .plugins: return .plugins
+        case .presets: return .presets
+        case .impulseResponses: return .impulseResponses
+        case .pluginContent: return .pluginContent
+        case .cachesDownloads: return .cachesDownloads
+        }
+    }
+
+    private static func audioCategory(for item: SizedItem) -> StorageExplorerAudioCategory? {
+        switch item.category {
+        case .projects:
+            return .audioProjects
+        case .plugins:
+            return .plugins
+        case .pluginData:
+            return .pluginContent
+        case .sampleLibraries:
+            return .sampleLibraries
+        case .audioFiles:
+            return .audioFiles
+        case .installers, .archives:
+            return audioCategory(forFolderPath: item.url.path) ?? .cachesDownloads
+        case .media, .other, nil:
+            return audioCategory(forFolderPath: item.url.path) ?? .otherAudioStorage
+        case .applications:
+            return nil
+        }
+    }
+
+    private static func audioCategory(forFolderPath path: String) -> StorageExplorerAudioCategory? {
+        let lower = normalizedPath(path).lowercased()
+        if lower.contains("/library/audio/plug-ins/") { return .plugins }
+        if lower.contains("/library/audio/presets/") { return .presets }
+        if lower.contains("/library/audio/impulse responses/") { return .impulseResponses }
+        if lower.contains("/library/application support/") && isAudioRelatedPath(lower) { return .pluginContent }
+        if lower.contains("/audio/") && lower.contains("/application support/") { return .pluginContent }
+        if lower.contains("/packdownloads/") || lower.contains("/library/caches/") && isAudioRelatedPath(lower) {
+            return .cachesDownloads
+        }
+        if lower.contains("/sample libraries/") || lower.contains("/sample library/")
+            || lower.contains("/samples/") || lower.contains("/loops/")
+            || lower.contains("/apple loops/") || lower.contains("sample librar") {
+            return .sampleLibraries
+        }
+        if lower.contains("/sessions/") || lower.contains("/session files/")
+            || lower.contains("/daw projects/") || lower.contains("/logic projects/") {
+            return .audioProjects
+        }
+        if lower.contains("/bounces/") || lower.contains("/exports/")
+            || lower.contains("/stems/") || lower.contains("/mixes/")
+            || lower.contains("/masters/") || lower.contains("/renders/") {
+            return .audioFiles
+        }
+        if isAudioRelatedPath(lower) { return .otherAudioStorage }
+        return nil
+    }
+
+    private func adjustedFolderSize(_ path: String, excluding excludedPaths: [String]) -> Int64 {
+        let base = size(ofPath: path)
+        guard base > 0 else { return 0 }
+        let excluded = totalSize(ofPaths: excludedPaths.filter { pathContains(path, candidate: $0) })
+        return max(0, base - excluded)
+    }
+
+    private func totalSize(ofPaths paths: [String], excluding excludedPaths: [String] = []) -> Int64 {
+        let normalized = paths
+            .map { Self.normalizedPath($0) }
+            .filter { size(ofPath: $0) > 0 }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count < rhs.count }
+                return lhs < rhs
+            }
+
+        var selected: [String] = []
+        for path in normalized {
+            if selected.contains(where: { Self.pathsOverlap($0, path) }) { continue }
+            selected.append(path)
+        }
+
+        let exclusions = excludedPaths.map { Self.normalizedPath($0) }
+        return selected.reduce(Int64(0)) { total, path in
+            let size = size(ofPath: path)
+            let excluded = totalSize(ofPaths: exclusions.filter { pathContains(path, candidate: $0) })
+            return total + max(0, size - excluded)
+        }
+    }
+
+    private func size(ofPath path: String) -> Int64 {
+        let normalized = normalizedPath(path)
+        if let size = result.folderSizes[normalized] { return size }
+        if normalized == normalizedPath(result.rootPath) { return result.totalSize }
+        return 0
+    }
+
+    private func hasChildren(_ path: String) -> Bool {
+        !(rawChildrenByPath[path]?.isEmpty ?? true)
+    }
+
+    private static func sourceBasePath(_ source: StorageExplorerSource) -> String {
+        switch source {
+        case .audio(_, let basePath), .applications(let basePath), .personal(_, let basePath), .otherMac(let basePath):
+            return basePath
+        }
+    }
+
+    private func sourceBasePath(_ source: StorageExplorerSource) -> String {
+        Self.sourceBasePath(source)
+    }
+
+    private func sourceBaseTitle(_ source: StorageExplorerSource) -> String {
+        switch source {
+        case .audio(let category, _): return category.rawValue
+        case .applications: return "Applications"
+        case .personal(let folder, _): return folder.rawValue
+        case .otherMac: return "Other Mac Storage"
+        }
+    }
+
+    private func sourceBaseIsAlreadyShown(_ source: StorageExplorerSource) -> Bool {
+        switch source {
+        case .audio, .applications, .otherMac:
+            return true
+        case .personal(let folder, _):
+            return folder != .other
+        }
+    }
+
+    private static func audioCategoryColor(_ category: StorageExplorerAudioCategory) -> Color {
+        switch category {
+        case .plugins: return .indigo
+        case .pluginContent: return .teal
+        case .presets: return .blue
+        case .sampleLibraries: return .mint
+        case .impulseResponses: return .cyan
+        case .audioProjects: return .purple
+        case .audioFiles: return .cyan
+        case .cachesDownloads: return .orange
+        case .otherAudioStorage: return .gray
+        }
+    }
+
+    private func audioCategoryColor(_ category: StorageExplorerAudioCategory) -> Color {
+        Self.audioCategoryColor(category)
+    }
+
+    private static func applicationDisplayName(_ name: String) -> String {
+        name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+
+    private static func displayName(forPath path: String) -> String {
+        let last = URL(fileURLWithPath: path).lastPathComponent
+        return last.isEmpty ? path : last
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func normalizedPath(_ path: String) -> String {
+        Self.normalizedPath(path)
+    }
+
+    private static func pathsOverlap(_ lhs: String, _ rhs: String) -> Bool {
+        pathContains(lhs, candidate: rhs) || pathContains(rhs, candidate: lhs)
+    }
+
+    private static func pathContains(_ path: String, candidate: String) -> Bool {
+        let parent = normalizedPath(path)
+        let child = normalizedPath(candidate)
+        if parent == "/" { return child.hasPrefix("/") }
+        return parent == child || child.hasPrefix(parent + "/")
+    }
+
+    private func pathContains(_ path: String, candidate: String) -> Bool {
+        Self.pathContains(path, candidate: candidate)
+    }
+
+    private static func isAudioRelatedPath(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        return audioPathMarkers.contains { lower.contains($0) }
+    }
+
+    private static let audioPathMarkers = [
+        "ableton", "logic", "garageband", "pro tools", "avid", "cubase", "nuendo",
+        "studio one", "fl studio", "reaper", "reason", "kontakt", "native instruments",
+        "xln audio", "addictive drums", "addictive keys", "slate digital", "waves",
+        "fabfilter", "soundtoys", "universal audio", "uad", "plugin alliance",
+        "izotope", "arturia", "spitfire", "eastwest", "toontrack", "superior drummer",
+        "ezdrummer", "omnisphere", "keyscape", "spectrasonics", "output", "uvi",
+        "sample librar", "/samples/", "/loops/", "/stems/", "/bounces/", "/mixes/",
+        "/masters/", "/renders/", "/sessions/", "/daw projects/", "/logic projects/",
+    ]
+}
+
 private struct ActionToast: Identifiable, Equatable {
     let id = UUID()
     let message: String
+}
+
+private struct ResultsPerformanceTimer {
+    private var checkpoints: [(String, Double)] = []
+    private let start = CFAbsoluteTimeGetCurrent()
+    private var last = CFAbsoluteTimeGetCurrent()
+
+    mutating func mark(_ label: String) {
+        #if DEBUG
+        let now = CFAbsoluteTimeGetCurrent()
+        checkpoints.append((label, (now - last) * 1000))
+        last = now
+        #endif
+    }
+
+    func finish(_ label: String) {
+        #if DEBUG
+        let total = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let details = checkpoints
+            .map { "  - \($0.0): \(Int($0.1.rounded())) ms" }
+            .joined(separator: "\n")
+        if details.isEmpty {
+            print("\(label) built in \(Int(total.rounded())) ms")
+        } else {
+            print("\(label) built in \(Int(total.rounded())) ms\n\(details)")
+        }
+        #endif
+    }
+}
+
+private struct KeepSafeIndex {
+    let exactItemsByPath: [String: KeepSafeItem]
+    let folderPrefixes: [(prefix: String, item: KeepSafeItem)]
+
+    init(items: [KeepSafeItem]) {
+        var exact: [String: KeepSafeItem] = [:]
+        var folders: [(String, KeepSafeItem)] = []
+
+        for item in items {
+            let original = Self.normalize(item.originalPath)
+            let resolved = Self.normalize(item.resolvedPath)
+            exact[original] = item
+            exact[resolved] = item
+            if item.itemType == .folder {
+                folders.append((original, item))
+                folders.append((resolved, item))
+            }
+        }
+
+        var seenFolders = Set<String>()
+        exactItemsByPath = exact
+        folderPrefixes = folders
+            .filter { seenFolders.insert($0.0).inserted }
+            .map { (prefix: $0.0, item: $0.1) }
+            .sorted { $0.prefix.count > $1.prefix.count }
+    }
+
+    func item(for path: String) -> KeepSafeItem? {
+        let normalized = Self.normalize(path)
+        if let item = exactItemsByPath[normalized] { return item }
+        return folderPrefixes.first { entry in
+            normalized == entry.prefix || normalized.hasPrefix(entry.prefix + "/")
+        }?.item
+    }
+
+    func isProtected(_ path: String) -> Bool {
+        item(for: path) != nil
+    }
+
+    private static func normalize(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
 }
 
 private enum ResultSectionID: Hashable {
@@ -256,6 +1396,7 @@ private enum ResultSectionID: Hashable {
     case recommendations
     case categories
     case audioSystemData
+    case audioSystemFolder(String)
     case keepSafe
     case duplicates
     case installers
@@ -370,6 +1511,8 @@ private extension Array where Element: Hashable {
 }
 
 struct ContentView: View {
+    private static let detectedAudioFoldersListID = "audio-system-detected-folders"
+
     @StateObject private var controller = ScanController()
     @StateObject private var keepSafeStore = KeepSafeStore.shared
     @State private var selectedDuplicatePaths: Set<String> = []
@@ -380,6 +1523,7 @@ struct ContentView: View {
     @State private var expandedAudioGuidancePaths: Set<String> = []
     @State private var expandedResultListIDs: Set<String> = []
     @State private var storageExplorerRoute: StorageExplorerRoute = .root
+    @State private var resultsPresentationModel: ResultsPresentationModel?
     @State private var pendingRemoveKeepSafeItem: KeepSafeItem?
     @State private var actionToast: ActionToast?
     @State private var isMovingToStaging = false
@@ -392,7 +1536,15 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 24) {
             header
             Group {
-                if let result = controller.result { resultsView(result) }
+                if let result = controller.result {
+                    let identity = resultsPresentationIdentity(for: result)
+                    if let model = resultsPresentationModel, model.identity == identity {
+                        resultsView(result, model: model)
+                    } else {
+                        preparingResultsView
+                            .onAppear { rebuildResultsPresentationModel(selectRecommendedDuplicates: true) }
+                    }
+                }
                 else if controller.isScanning { scanningView }
                 else { emptyView }
             }
@@ -420,12 +1572,16 @@ struct ContentView: View {
             refreshStaging()
         }
         .onChange(of: scanResultExpansionIdentity(controller.result)) { _ in
-            resetDuplicateSelection()
-            selectedInstallerPaths.removeAll()
             expandedResultListIDs.removeAll()
             storageExplorerRoute = .root
             refreshKeepSafeFromCurrentScan()
             refreshStaging()
+            rebuildResultsPresentationModel(selectRecommendedDuplicates: true)
+            selectedInstallerPaths.removeAll()
+        }
+        .onChange(of: keepSafePresentationIdentity()) { _ in
+            rebuildResultsPresentationModel(selectRecommendedDuplicates: false)
+            pruneSelectionsAgainstPresentationModel()
         }
         .alert(item: $appAlert) { alert in
             Alert(
@@ -565,7 +1721,18 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.3), value: controller.liveBytes)
     }
 
-    private func resultsView(_ r: ScanResult) -> some View {
+    private var preparingResultsView: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Preparing results...")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private func resultsView(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
@@ -603,24 +1770,24 @@ struct ContentView: View {
                     }
                     .id(ResultSectionID.summary)
 
-                    card { categorySection(r) }
+                    card { categorySection(model: model) }
                         .id(ResultSectionID.categories)
-                    storageRecommendationsSection(r, proxy: proxy)
+                    storageRecommendationsSection(model, result: r, proxy: proxy)
                         .id(ResultSectionID.recommendations)
-                    card { audioSystemDataSection(r) }
+                    card { audioSystemDataSection(r, model: model) }
                         .id(ResultSectionID.audioSystemData)
-                    card { keepSafeSection() }
+                    card { keepSafeSection(model: model) }
                         .id(ResultSectionID.keepSafe)
-                    card { duplicatesSection(r) }
+                    card { duplicatesSection(r, model: model) }
                         .id(ResultSectionID.duplicates)
-                    card { installersSection(r) }
+                    card { installersSection(model: model) }
                         .id(ResultSectionID.installers)
                     card { stagingSection() }
                         .id(ResultSectionID.staging)
-                    card { browserSection() }
+                    card { browserSection(model: model) }
                         .id(ResultSectionID.storageExplorer)
 
-                    largestAudioAssetsSection(r)
+                    largestAudioAssetsSection(model: model)
                         .id(ResultSectionID.largestAudioAssets)
 
                     Text("Scanned in \(String(format: "%.1f", r.elapsed))s · "
@@ -640,15 +1807,62 @@ struct ContentView: View {
             .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
+    private func resultsPresentationIdentity(for result: ScanResult) -> String {
+        scanResultExpansionIdentity(result) + "|" + keepSafePresentationIdentity()
+    }
+
+    private func keepSafePresentationIdentity() -> String {
+        keepSafeStore.items
+            .map {
+                [
+                    $0.id.uuidString,
+                    $0.originalPath,
+                    $0.resolvedPath,
+                    $0.itemType.rawValue,
+                    "\($0.sizeAtProtection)",
+                    "\($0.dateProtected.timeIntervalSinceReferenceDate)",
+                    $0.classification ?? "",
+                    $0.category ?? ""
+                ].joined(separator: ":")
+            }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    private func rebuildResultsPresentationModel(selectRecommendedDuplicates: Bool) {
+        guard let result = controller.result else {
+            resultsPresentationModel = nil
+            selectedDuplicatePaths.removeAll()
+            selectedInstallerPaths.removeAll()
+            return
+        }
+
+        let identity = resultsPresentationIdentity(for: result)
+        let model = ResultsPresentationModel.build(
+            result: result,
+            keepSafeItems: keepSafeStore.items,
+            identity: identity
+        )
+        resultsPresentationModel = model
+        if selectRecommendedDuplicates {
+            selectedDuplicatePaths = model.recommendedDuplicateSelection
+        }
+        pruneSelectionsAgainstPresentationModel()
+    }
+
+    private func pruneSelectionsAgainstPresentationModel() {
+        guard let model = resultsPresentationModel else { return }
+        selectedDuplicatePaths = selectedDuplicatePaths.filter { model.duplicateStageablePaths.contains($0) }
+        selectedInstallerPaths = selectedInstallerPaths.filter { model.installerStageablePaths.contains($0) }
+    }
+
     @ViewBuilder
     private func storageRecommendationsSection(
-        _ r: ScanResult,
+        _ model: ResultsPresentationModel,
+        result r: ScanResult,
         proxy: ScrollViewProxy
     ) -> some View {
-        let recommendations = StorageRecommendationEngine.recommendations(
-            for: r,
-            protectedItems: keepSafeStore.items
-        )
+        let recommendations = model.recommendations
 
         if !recommendations.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
@@ -714,7 +1928,7 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 if let destination = recommendation.destination {
                     Button {
-                        navigateToRecommendation(destination, result: result, proxy: proxy)
+                        navigateToRecommendation(destination, result: result, model: resultsPresentationModel, proxy: proxy)
                     } label: {
                         Label(recommendation.actionTitle, systemImage: "arrow.right")
                             .labelStyle(.titleAndIcon)
@@ -744,6 +1958,7 @@ struct ContentView: View {
     private func navigateToRecommendation(
         _ destination: StorageRecommendationDestination,
         result: ScanResult,
+        model: ResultsPresentationModel?,
         proxy: ScrollViewProxy
     ) {
         let target: ResultSectionID
@@ -753,7 +1968,19 @@ struct ContentView: View {
         case .archiveCandidates:
             storageExplorerRoute = .personalFiles
             target = .storageExplorer
-        case .libraryRelocation, .leaveInPlace:
+        case .libraryRelocation:
+            if let candidatePath = model?.firstRelocationCandidatePath {
+                expandedAudioGuidancePaths.insert(candidatePath)
+                expandedResultListIDs.insert(Self.detectedAudioFoldersListID)
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        proxy.scrollTo(ResultSectionID.audioSystemFolder(candidatePath), anchor: .center)
+                    }
+                }
+                return
+            }
+            target = .audioSystemData
+        case .leaveInPlace:
             target = .audioSystemData
         case .applications:
             storageExplorerRoute = .applications
@@ -767,12 +1994,9 @@ struct ContentView: View {
         }
     }
 
-    private func categorySection(_ r: ScanResult) -> some View {
-        let cats = Category.allCases
-            .map { ($0, r.categoryTotals[$0] ?? 0) }
-            .filter { $0.1 > 0 }
-            .sorted { $0.1 > $1.1 }
-        let total = max(r.totalSize, 1)
+    private func categorySection(model: ResultsPresentationModel) -> some View {
+        let cats = model.categoryRows
+        let total = max(model.totalSize, 1)
         let mid = (cats.count + 1) / 2
         let leftCol = Array(cats.prefix(mid))
         let rightCol = Array(cats.dropFirst(mid))
@@ -781,9 +2005,9 @@ struct ContentView: View {
             Text("What's Filling Your Drive").font(.headline)
             GeometryReader { geo in
                 HStack(spacing: 1) {
-                    ForEach(cats, id: \.0) { cat, size in
-                        Rectangle().fill(cat.color)
-                            .frame(width: max(2, geo.size.width * (Double(size) / Double(total))))
+                    ForEach(cats, id: \.category) { row in
+                        Rectangle().fill(row.category.color)
+                            .frame(width: max(2, geo.size.width * (Double(row.size) / Double(total))))
                     }
                 }
             }
@@ -792,14 +2016,14 @@ struct ContentView: View {
 
             HStack(alignment: .top, spacing: 24) {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(leftCol, id: \.0) { cat, size in
-                        categoryRow(cat, size: size, total: total)
+                    ForEach(leftCol, id: \.category) { row in
+                        categoryRow(row.category, size: row.size, total: total)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(rightCol, id: \.0) { cat, size in
-                        categoryRow(cat, size: size, total: total)
+                    ForEach(rightCol, id: \.category) { row in
+                        categoryRow(row.category, size: row.size, total: total)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -820,8 +2044,8 @@ struct ContentView: View {
         }
     }
 
-    private func keepSafeSection() -> some View {
-        let items = sortedKeepSafeItems()
+    private func keepSafeSection(model: ResultsPresentationModel) -> some View {
+        let items = model.sortedKeepSafeItems
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -1091,19 +2315,19 @@ struct ContentView: View {
         }
     }
 
-    private func audioSystemDataSection(_ r: ScanResult) -> some View {
+    private func audioSystemDataSection(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
         let audio = r.audioSystemData
-        let categories = AudioSystemDataCategory.allCases
-            .map { ($0, audio.categoryTotals[$0] ?? 0) }
-        let detectedAudioFoldersListID = "audio-system-detected-folders"
+        let categories = model.audioCategoryRows
+        let topFolders = model.topAudioFolders
+        let topFolderPaths = Set(topFolders.map { $0.item.path })
         let detectedAudioFolderLimit = 12
         let rows = visibleResultItems(
-            audio.items,
+            model.detectedAudioFolders,
             compactCount: detectedAudioFolderLimit,
-            listID: detectedAudioFoldersListID
+            listID: Self.detectedAudioFoldersListID
         )
         let hiddenDetectedAudioFolderCount = hiddenResultItemCount(
-            audio.items,
+            model.detectedAudioFolders,
             compactCount: detectedAudioFolderLimit
         )
 
@@ -1148,8 +2372,8 @@ struct ContentView: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(categories, id: \.0) { category, size in
-                        audioBreakdownRow(category, size: size, total: max(audio.totalSize, 1))
+                    ForEach(categories, id: \.category) { row in
+                        audioBreakdownRow(row.category, size: row.size, total: max(audio.totalSize, 1))
                     }
                 }
 
@@ -1157,16 +2381,18 @@ struct ContentView: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Top folders").font(.subheadline.weight(.semibold))
-                    ForEach(audio.topFolders) { audioSystemDataRow($0) }
+                    ForEach(topFolders) { audioSystemDataRow($0, isScrollAnchor: true) }
                 }
 
                 Divider()
 
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Detected audio folders").font(.subheadline.weight(.semibold))
-                    ForEach(rows) { audioSystemDataRow($0) }
+                    ForEach(rows) { row in
+                        audioSystemDataRow(row, isScrollAnchor: !topFolderPaths.contains(row.item.path))
+                    }
                     expandableResultListToggle(
-                        listID: detectedAudioFoldersListID,
+                        listID: Self.detectedAudioFoldersListID,
                         hiddenCount: hiddenDetectedAudioFolderCount,
                         itemSingular: "audio folder",
                         itemPlural: "audio folders",
@@ -1202,11 +2428,16 @@ struct ContentView: View {
         }
     }
 
-    private func audioSystemDataRow(_ item: AudioSystemDataItem) -> some View {
-        let guidance = AudioFolderGuidanceClassifier.guidance(for: item)
+    @ViewBuilder
+    private func audioSystemDataRow(
+        _ row: AudioFolderPresentationRow,
+        isScrollAnchor: Bool = false
+    ) -> some View {
+        let item = row.item
+        let guidance = row.guidance
         let isExpanded = expandedAudioGuidancePaths.contains(item.path)
 
-        return VStack(alignment: .leading, spacing: 4) {
+        let row = VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Circle().fill(item.category.color).frame(width: 8, height: 8)
                 Text(item.friendlyName)
@@ -1248,13 +2479,21 @@ struct ContentView: View {
             }
         }
         .padding(.vertical, 3)
+
+        if isScrollAnchor {
+            row.id(ResultSectionID.audioSystemFolder(item.path))
+        } else {
+            row
+        }
     }
 
     private func audioFolderGuidanceDetails(
         item: AudioSystemDataItem,
         guidance: AudioFolderGuidance
     ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let vendorGuide = guidance.vendorGuide
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(item.friendlyName)
                     .font(.caption.weight(.semibold))
@@ -1293,27 +2532,56 @@ struct ContentView: View {
                 .subtleTextAction(help: "Copy this folder path")
             }
 
-            Text(guidance.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text(guidance.guidance)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            audioFolderAdvisorSection(
+                title: "About",
+                text: vendorGuide.about
+            )
+            audioFolderAdvisorSection(
+                title: "Why it exists",
+                text: vendorGuide.whyItExists
+            )
 
-            HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Relocation Support")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 Label(
-                    guidance.expectedToRemainInPlace ? "Normally remains in place" : "May be relocatable with vendor support",
-                    systemImage: guidance.expectedToRemainInPlace ? "lock" : "externaldrive"
+                    guidance.relocationSupport.displayTitle,
+                    systemImage: relocationSupportIcon(guidance.relocationSupport)
                 )
-                Label(
-                    guidance.vendorRelocationMayBePossible ? "Check vendor tools or settings" : "Manual relocation is not recommended",
-                    systemImage: guidance.vendorRelocationMayBePossible ? "gearshape" : "exclamationmark.triangle"
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(relocationSupportColor(guidance.relocationSupport))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(relocationSupportColor(guidance.relocationSupport).opacity(0.10), in: Capsule())
+                if isUnknownRelocationSupport(guidance.relocationSupport) {
+                    Text("We could not verify an official relocation method for this folder.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if let method = vendorGuide.recommendedMethod {
+                audioFolderAdvisorSection(
+                    title: "Recommended Method",
+                    text: method
                 )
             }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+
+            audioFolderAdvisorSection(
+                title: "Risk Guidance",
+                text: vendorGuide.riskSummary
+            )
+
+            if let urlString = vendorGuide.documentationURLString,
+               let url = URL(string: urlString) {
+                Link(destination: url) {
+                    Label(vendorGuide.documentationTitle ?? "Vendor Documentation", systemImage: "arrow.up.right.square")
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.teal)
+            }
 
             Text(item.path)
                 .font(.caption2.monospaced())
@@ -1327,9 +2595,62 @@ struct ContentView: View {
         .padding(.top, 4)
     }
 
-    private func largestAudioAssetsSection(_ r: ScanResult) -> some View {
-        let audioAssets = largestAudioAssets(in: r)
-        let otherLargeApplications = otherLargeApplications(in: r)
+    private func audioFolderAdvisorSection(title: String, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func relocationSupportIcon(_ support: RelocationSupport) -> String {
+        switch support {
+        case .officialSupported:
+            return "checkmark.seal"
+        case .vendorToolRequired:
+            return "gearshape"
+        case .manualPossible:
+            return "hand.raised"
+        case .reviewFirst:
+            return "magnifyingglass.circle"
+        case .leaveInPlace:
+            return "lock"
+        case .unknown:
+            return "questionmark.circle"
+        }
+    }
+
+    private func relocationSupportColor(_ support: RelocationSupport) -> Color {
+        switch support {
+        case .officialSupported, .vendorToolRequired:
+            return .teal
+        case .manualPossible:
+            return .blue
+        case .reviewFirst:
+            return .orange
+        case .leaveInPlace:
+            return .secondary
+        case .unknown:
+            return .secondary
+        }
+    }
+
+    private func isUnknownRelocationSupport(_ support: RelocationSupport) -> Bool {
+        switch support {
+        case .unknown:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func largestAudioAssetsSection(model: ResultsPresentationModel) -> some View {
+        let audioAssets = model.largestAudioAssets
+        let otherLargeApplications = model.otherLargeApplications
         let audioAssetsListID = "largest-audio-assets"
         let audioAssetsLimit = 12
         let visibleAudioAssets = visibleResultItems(
@@ -1417,10 +2738,11 @@ struct ContentView: View {
         }
     }
 
-    private func duplicatesSection(_ r: ScanResult) -> some View {
-        let selectedBytes = selectedDuplicateBytes(in: r)
-        let selectedCount = selectedDuplicatePaths.filter(isStageableDuplicatePath).count
-        let actionableReclaimable = actionableDuplicateReclaimable(in: r)
+    private func duplicatesSection(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
+        let selectedPaths = selectedDuplicatePaths.intersection(model.duplicateStageablePaths)
+        let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.duplicatePathSizes[$1] ?? 0) }
+        let selectedCount = selectedPaths.count
+        let actionableReclaimable = model.duplicateActionableTotal
         return VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
@@ -1468,21 +2790,22 @@ struct ContentView: View {
                         .padding(.vertical, 2)
                     }
 
-                    ForEach(r.duplicateGroups) { confidentRow($0) }
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.duplicateGroups) { confidentRow($0) }
+                    }
                 }
             }
 
-            if !r.identicalContentGroups.isEmpty {
+            if !model.identicalContentGroups.isEmpty {
                 let identicalContentGroupsListID = "identical-content-groups"
                 let identicalContentGroupLimit = 10
-                let sortedIdenticalContentItems = sortedIdenticalContentGroups(r.identicalContentGroups)
                 let visibleIdenticalContentGroups = visibleResultItems(
-                    sortedIdenticalContentItems,
+                    model.identicalContentGroups,
                     compactCount: identicalContentGroupLimit,
                     listID: identicalContentGroupsListID
                 )
                 let hiddenIdenticalContentGroupCount = hiddenResultItemCount(
-                    sortedIdenticalContentItems,
+                    model.identicalContentGroups,
                     compactCount: identicalContentGroupLimit
                 )
 
@@ -1493,8 +2816,10 @@ struct ContentView: View {
                     Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
                         .font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    ForEach(visibleIdenticalContentGroups) { item in
-                        identicalRow(item.group, classification: item.classification)
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(visibleIdenticalContentGroups) { item in
+                            identicalRow(item.group, classification: item.classification, sharedParent: item.sharedParent)
+                        }
                     }
                     expandableResultListToggle(
                         listID: identicalContentGroupsListID,
@@ -1510,9 +2835,8 @@ struct ContentView: View {
         }
     }
 
-    private func confidentRow(_ g: DuplicateGroup) -> some View {
-        let keeper = recommendedKeeper(in: g)
-        let actionableBytes = actionableDuplicateBytes(in: g, keeper: keeper)
+    private func confidentRow(_ row: DuplicateGroupPresentationRow) -> some View {
+        let g = row.group
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Image(systemName: "doc.on.doc.fill").foregroundStyle(.teal).font(.caption)
@@ -1520,28 +2844,25 @@ struct ContentView: View {
                     .lineLimit(1).truncationMode(.middle)
                 Text("×\(g.count)").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(human(actionableBytes)) reclaimable")
+                Text("\(human(row.actionableBytes)) reclaimable")
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
-            ForEach(g.paths, id: \.self) { path in
-                duplicatePathRow(path, fileSize: g.fileSize, keeper: keeper)
+            ForEach(row.paths) { pathRow in
+                duplicatePathRow(pathRow)
             }
         }
         .padding(.vertical, 4)
     }
 
-    private func duplicatePathRow(_ path: String, fileSize: Int64, keeper: String?) -> some View {
-        let isKeeper = path == keeper
-        let safetyClassification = DuplicateSafetyClassifier.classify(path: path)
-        let isNeverRecommend = safetyClassification.isNeverRecommend
-        let keepSafeItem = keepSafeStore.protectedItem(for: path)
-        let isKeepSafe = keepSafeItem != nil
-        let isSelected = selectedDuplicatePaths.contains(path) && !isNeverRecommend && !isKeepSafe
+    private func duplicatePathRow(_ row: DuplicatePathPresentationRow) -> some View {
+        let path = row.path
+        let safetyClassification = row.safetyClassification
+        let isSelected = selectedDuplicatePaths.contains(path) && row.isStageable
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) && !isNeverRecommend && !isKeepSafe },
+                get: { selectedDuplicatePaths.contains(path) && row.isStageable },
                 set: { checked in
-                    if checked && !isNeverRecommend && !isKeepSafe {
+                    if checked && row.isStageable {
                         selectedDuplicatePaths.insert(path)
                     } else {
                         selectedDuplicatePaths.remove(path)
@@ -1550,7 +2871,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(isNeverRecommend || isKeepSafe)
+            .disabled(!row.isStageable)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(path)
@@ -1558,19 +2879,19 @@ struct ContentView: View {
                     .foregroundStyle(isSelected ? .primary : .tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(duplicateRecommendationLabel(isKeeper: isKeeper, safetyClassification: safetyClassification))
+                Text(duplicateRecommendationLabel(isKeeper: row.isKeeper, safetyClassification: safetyClassification))
                     .font(.caption2)
-                    .foregroundStyle((isKeeper || isNeverRecommend || isKeepSafe) ? Color.secondary : Color.teal)
-                    .help(duplicateRecommendationDescription(isKeeper: isKeeper, safetyClassification: safetyClassification))
+                    .foregroundStyle((row.isKeeper || row.isNeverRecommend || row.isKeepSafe) ? Color.secondary : Color.teal)
+                    .help(duplicateRecommendationDescription(isKeeper: row.isKeeper, safetyClassification: safetyClassification))
             }
             Spacer()
-            Text(human(fileSize))
+            Text(human(row.fileSize))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
             keepSafeButton(
                 path: path,
                 itemType: .file,
-                size: fileSize,
+                size: row.fileSize,
                 classification: safetyClassification.label,
                 category: "Duplicate File"
             )
@@ -1578,14 +2899,12 @@ struct ContentView: View {
         .padding(.vertical, 2)
     }
 
-    private func installersSection(_ r: ScanResult) -> some View {
-        let sorted = r.installerFiles.sorted { $0.size > $1.size }
-        let stageable = sorted.filter { isStageableInstallerPath($0.url.path) }
-        let total = stageable.reduce(Int64(0)) { $0 + $1.size }
-        let selectedCount = selectedInstallerPaths.filter(isStageableInstallerPath).count
-        let selectedBytes = sorted
-            .filter { selectedInstallerPaths.contains($0.url.path) && isStageableInstallerPath($0.url.path) }
-            .reduce(Int64(0)) { $0 + $1.size }
+    private func installersSection(model: ResultsPresentationModel) -> some View {
+        let sorted = model.installerRows
+        let selectedPaths = selectedInstallerPaths.intersection(model.installerStageablePaths)
+        let total = model.installerActionableTotal
+        let selectedCount = selectedPaths.count
+        let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.installerPathSizes[$1] ?? 0) }
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -1606,7 +2925,7 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack(spacing: 12) {
-                    Button("Select All") { selectAllInstallers(stageable) }
+                    Button("Select All") { selectAllInstallers(model.stageableInstallerRows) }
                         .buttonStyle(.borderless)
                         .subtleTextAction(help: "Select all stageable installers")
                     Button("Deselect All") { deselectAllInstallers() }
@@ -1635,25 +2954,26 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(sorted) { item in
-                        installerRow(item)
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(sorted) { item in
+                            installerRow(item)
+                        }
                     }
                 }
             }
         }
     }
 
-    private func installerRow(_ item: SizedItem) -> some View {
-        let path = item.url.path
-        let keepSafeItem = keepSafeStore.protectedItem(for: path)
-        let isKeepSafe = keepSafeItem != nil
-        let isSelected = selectedInstallerPaths.contains(path) && !isKeepSafe
-        let alreadyInstalled = InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
+    private func installerRow(_ row: InstallerPresentationRow) -> some View {
+        let item = row.item
+        let path = row.path
+        let isSelected = selectedInstallerPaths.contains(path) && row.isStageable
+        let alreadyInstalled = row.alreadyInstalled
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedInstallerPaths.contains(path) && !isKeepSafe },
+                get: { selectedInstallerPaths.contains(path) && row.isStageable },
                 set: { checked in
-                    if checked && !isKeepSafe {
+                    if checked && row.isStageable {
                         selectedInstallerPaths.insert(path)
                     } else {
                         selectedInstallerPaths.remove(path)
@@ -1662,12 +2982,12 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(isKeepSafe)
+            .disabled(!row.isStageable)
 
             Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.displayName)
+                Text(row.displayName)
                     .fontWeight(.medium)
                     .foregroundStyle(isSelected ? .primary : .secondary)
                     .lineLimit(1)
@@ -1675,9 +2995,9 @@ struct ContentView: View {
                 if alreadyInstalled {
                     Text("App already in Applications — safe to remove")
                         .font(.caption2)
-                        .foregroundStyle(isKeepSafe ? Color.secondary : Color.teal)
+                        .foregroundStyle(row.isKeepSafe ? Color.secondary : Color.teal)
                 } else {
-                    Text(item.parentPath)
+                    Text(row.parentPath)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -1778,13 +3098,13 @@ struct ContentView: View {
 
     private func identicalRow(
         _ g: DuplicateGroup,
-        classification: DifferentNameMatchClassification
+        classification: DifferentNameMatchClassification,
+        sharedParent: String?
     ) -> some View {
         let fileListID = "identical-content-files-\(g.id.uuidString)"
         let fileLimit = 8
         let visiblePaths = visibleResultItems(g.paths, compactCount: fileLimit, listID: fileListID)
         let hiddenCount = hiddenResultItemCount(g.paths, compactCount: fileLimit)
-        let sharedParent = DifferentNameMatchClassifier.sharedParent(paths: g.paths)
 
         return VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
@@ -1898,19 +3218,17 @@ struct ContentView: View {
         }
     }
 
-    private func browserSection() -> some View {
-        guard let result = controller.result else {
-            return AnyView(EmptyView())
-        }
-        let route = normalizedStorageExplorerRoute(storageExplorerRoute, in: result)
-        let allNodes = storageExplorerNodes(for: route, in: result)
+    private func browserSection(model: ResultsPresentationModel) -> some View {
+        let presentation = model.routePresentation(for: storageExplorerRoute)
+        let route = presentation.route
+        let allNodes = presentation.nodes
         let listID = storageExplorerListID(for: route)
         let compactLimit = storageExplorerCompactLimit(for: route)
         let nodes = visibleResultItems(allNodes, compactCount: compactLimit, listID: listID)
         let hiddenNodeCount = hiddenResultItemCount(allNodes, compactCount: compactLimit)
         let itemNames = storageExplorerItemNames(for: route)
-        let parentTotal = max(storageExplorerTotal(for: route, nodes: allNodes, in: result), 1)
-        let residual = storageExplorerResidual(for: route, nodes: allNodes, parentTotal: parentTotal)
+        let parentTotal = max(presentation.total, 1)
+        let residual = presentation.residual
 
         return AnyView(
             VStack(alignment: .leading, spacing: 14) {
@@ -1926,7 +3244,7 @@ struct ContentView: View {
                     Text(human(parentTotal))
                         .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
                 }
-                storageExplorerBreadcrumbs(route, result: result)
+                storageExplorerBreadcrumbs(presentation.breadcrumbs)
                 if case .applications = route {
                     applicationsExplorerContent(
                         nodes: allNodes,
@@ -1959,10 +3277,8 @@ struct ContentView: View {
     }
 
     private func storageExplorerBreadcrumbs(
-        _ route: StorageExplorerRoute,
-        result: ScanResult
+        _ crumbs: [StorageExplorerBreadcrumb]
     ) -> some View {
-        let crumbs = storageExplorerBreadcrumbItems(for: route, in: result)
         return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 ForEach(Array(crumbs.enumerated()), id: \.offset) { idx, crumb in
@@ -2190,11 +3506,8 @@ struct ContentView: View {
     private func classifiedApplicationItems(from nodes: [StorageExplorerNode]) -> [ApplicationExplorerItem] {
         nodes
             .compactMap { node -> ApplicationExplorerItem? in
-                guard let path = node.path else { return nil }
-                let classification = ApplicationClassifier.classify(
-                    displayName: node.title,
-                    path: path
-                )
+                guard node.path != nil else { return nil }
+                let classification = cachedApplicationClassification(title: node.subtitle)
                 return ApplicationExplorerItem(node: node, classification: classification)
             }
             .sorted { lhs, rhs in
@@ -2206,6 +3519,12 @@ struct ContentView: View {
                 }
                 return lhs.node.title.localizedStandardCompare(rhs.node.title) == .orderedAscending
             }
+    }
+
+    private func cachedApplicationClassification(title: String) -> ApplicationClassification {
+        let kind = ApplicationClassificationKind.allCases.first { $0.displayTitle == title }
+            ?? .otherApplication
+        return ApplicationClassification(kind: kind)
     }
 
     private func storageExplorerRow(_ node: StorageExplorerNode, parentTotal: Int64) -> some View {
@@ -3343,7 +4662,10 @@ struct ContentView: View {
     }
 
     private func isStageableInstallerPath(_ path: String) -> Bool {
-        !keepSafeStore.isProtected(path)
+        if let model = resultsPresentationModel {
+            return model.installerStageablePaths.contains(path)
+        }
+        return !keepSafeStore.isProtected(path)
     }
 
     private func revealDifferentNameFileInFinder(_ path: String) {
@@ -3411,18 +4733,15 @@ struct ContentView: View {
     }
 
     private func resetDuplicateSelection() {
-        guard let result = controller.result else {
+        guard let model = resultsPresentationModel else {
             selectedDuplicatePaths = []
             return
         }
-        selectedDuplicatePaths = Set(result.duplicateGroups.flatMap { group in
-            guard let keeper = recommendedKeeper(in: group) else { return [String]() }
-            return group.paths.filter { $0 != keeper && isStageableDuplicatePath($0) }
-        })
+        selectedDuplicatePaths = model.recommendedDuplicateSelection
     }
 
     private func selectAllDuplicates(_ r: ScanResult) {
-        selectedDuplicatePaths = Set(r.duplicateGroups.flatMap { group in
+        selectedDuplicatePaths = resultsPresentationModel?.duplicateStageablePaths ?? Set(r.duplicateGroups.flatMap { group in
             group.paths.filter(isStageableDuplicatePath)
         })
         showToast("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected")
@@ -3433,8 +4752,8 @@ struct ContentView: View {
         showToast("Selection cleared")
     }
 
-    private func selectAllInstallers(_ items: [SizedItem]) {
-        selectedInstallerPaths = Set(items.map(\.url.path).filter(isStageableInstallerPath))
+    private func selectAllInstallers(_ items: [InstallerPresentationRow]) {
+        selectedInstallerPaths = Set(items.filter(\.isStageable).map(\.path))
         showToast("\(selectedInstallerPaths.count) installer\(selectedInstallerPaths.count == 1 ? "" : "s") selected")
     }
 
@@ -3452,7 +4771,10 @@ struct ContentView: View {
     }
 
     private func isStageableDuplicatePath(_ path: String) -> Bool {
-        !DuplicateSafetyClassifier.isNeverRecommend(path: path) && !keepSafeStore.isProtected(path)
+        if let model = resultsPresentationModel {
+            return model.duplicateStageablePaths.contains(path)
+        }
+        return !DuplicateSafetyClassifier.isNeverRecommend(path: path) && !keepSafeStore.isProtected(path)
     }
 
     private func duplicateRecommendationLabel(

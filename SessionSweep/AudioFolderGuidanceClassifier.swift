@@ -18,6 +18,8 @@ struct AudioFolderGuidance: Sendable {
     let guidance: String
     let expectedToRemainInPlace: Bool
     let vendorRelocationMayBePossible: Bool
+    let relocationSupport: RelocationSupport
+    let vendorGuide: VendorGuide
 }
 
 enum AudioFolderGuidanceClassifier {
@@ -28,6 +30,7 @@ enum AudioFolderGuidanceClassifier {
         if isPluginBinary(item: item, lowerPath: lowerPath) {
             return guidance(
                 .pluginBinary,
+                item: item,
                 explanation: "Installed plugin files used by your DAW.",
                 guidance: "Leave in place. Moving these manually can prevent plugins from loading.",
                 expectedToRemainInPlace: true,
@@ -38,6 +41,7 @@ enum AudioFolderGuidanceClassifier {
         if item.category == .cachesDownloads || containsAny(lowerPath, cacheDownloadMarkers) {
             return guidance(
                 .cacheDownload,
+                item: item,
                 explanation: "Temporary or downloaded content created by audio software.",
                 guidance: "May be reviewable, but SessionSweep should not recommend removal unless existing cleanup logic already classifies it as appropriate for cleanup.",
                 expectedToRemainInPlace: false,
@@ -48,6 +52,7 @@ enum AudioFolderGuidanceClassifier {
         if item.category == .impulseResponses || containsAny(lowerPath, impulseResponseMarkers) {
             return guidance(
                 .impulseResponseLibrary,
+                item: item,
                 explanation: "Impulse responses used by reverbs, cabinet simulators, and acoustic processors.",
                 guidance: "May be relocatable if the plugin lets you choose a custom IR folder. Do not move it manually unless that workflow is documented.",
                 expectedToRemainInPlace: false,
@@ -57,12 +62,13 @@ enum AudioFolderGuidanceClassifier {
 
         if isPresetContentLibrary(item: item, lowerPath: lowerPath)
             || isContentLibrary(lowerPath: lowerPath) {
-            return contentLibraryGuidance(lowerPath: lowerPath)
+            return contentLibraryGuidance(item: item, lowerPath: lowerPath)
         }
 
         if containsAny(lowerPath, sampleLibraryMarkers) {
             return guidance(
                 .sampleLibrary,
+                item: item,
                 explanation: "Audio samples used by samplers, drum instruments, or production tools.",
                 guidance: "Often movable to an external drive when the vendor supports choosing a library location. Avoid dragging it manually unless the vendor documents that workflow.",
                 expectedToRemainInPlace: false,
@@ -73,6 +79,7 @@ enum AudioFolderGuidanceClassifier {
         if item.category == .presets || lowerPath.contains("/library/audio/presets/") {
             return guidance(
                 .presetLibrary,
+                item: item,
                 explanation: "Preset and configuration files used by plugins or instruments.",
                 guidance: "Usually best left in place. Some folders labeled as presets may also contain large samples or expansion content.",
                 expectedToRemainInPlace: true,
@@ -83,6 +90,7 @@ enum AudioFolderGuidanceClassifier {
         if item.category == .pluginContent && lowerPath.contains("/application support/") {
             return guidance(
                 .applicationSupport,
+                item: item,
                 explanation: "Support files, databases, presets, licensing data, and other resources used by installed audio software.",
                 guidance: "Usually required. Do not move manually unless the software vendor provides an official relocation tool or library manager.",
                 expectedToRemainInPlace: true,
@@ -92,6 +100,7 @@ enum AudioFolderGuidanceClassifier {
 
         return guidance(
             .unknownAudioFolder,
+            item: item,
             explanation: "Audio-related storage that SessionSweep cannot confidently classify.",
             guidance: "Review in Finder and consult the software vendor before moving anything. SessionSweep cannot determine whether you still need this content.",
             expectedToRemainInPlace: true,
@@ -99,10 +108,14 @@ enum AudioFolderGuidanceClassifier {
         )
     }
 
-    private static nonisolated func contentLibraryGuidance(lowerPath: String) -> AudioFolderGuidance {
+    private static nonisolated func contentLibraryGuidance(
+        item: AudioSystemDataItem,
+        lowerPath: String
+    ) -> AudioFolderGuidance {
         if lowerPath.contains("/library/audio/presets/refx") || lowerPath.contains("nexus") {
             return guidance(
                 .contentLibrary,
+                item: item,
                 explanation: "This folder may include NEXUS presets, expansions, samples, and other sound content rather than only lightweight preset files.",
                 guidance: "It may support relocation to an external drive through reFX tools or settings. Do not move it manually unless reFX documents that workflow.",
                 expectedToRemainInPlace: false,
@@ -112,6 +125,7 @@ enum AudioFolderGuidanceClassifier {
 
         return guidance(
             .contentLibrary,
+            item: item,
             explanation: "Large sounds, expansions, samples, or factory content used by an instrument or plugin.",
             guidance: "May support relocation to an external drive through the vendor's own application or settings. Do not drag it manually unless the vendor documents that workflow.",
             expectedToRemainInPlace: false,
@@ -151,18 +165,28 @@ enum AudioFolderGuidanceClassifier {
 
     private static nonisolated func guidance(
         _ kind: AudioFolderGuidanceKind,
+        item: AudioSystemDataItem,
         explanation: String,
         guidance: String,
         expectedToRemainInPlace: Bool,
         vendorRelocationMayBePossible: Bool
     ) -> AudioFolderGuidance {
-        AudioFolderGuidance(
+        let vendorGuide = VendorRelocationAdvisor.guide(
+            for: item,
+            kind: kind,
+            expectedToRemainInPlace: expectedToRemainInPlace,
+            vendorRelocationMayBePossible: vendorRelocationMayBePossible
+        )
+
+        return AudioFolderGuidance(
             kind: kind,
             displayTitle: kind.rawValue,
             explanation: explanation,
             guidance: guidance,
             expectedToRemainInPlace: expectedToRemainInPlace,
-            vendorRelocationMayBePossible: vendorRelocationMayBePossible
+            vendorRelocationMayBePossible: vendorRelocationMayBePossible,
+            relocationSupport: vendorGuide.relocationSupport,
+            vendorGuide: vendorGuide
         )
     }
 
