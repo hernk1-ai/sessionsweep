@@ -47,11 +47,23 @@ enum VendorRelocationAdvisor {
         vendorRelocationMayBePossible: Bool
     ) -> VendorGuide {
         let normalizedPath = URL(fileURLWithPath: item.path).standardizedFileURL.path
-        let lowerPath = normalizedPath.lowercased()
+        return guide(
+            for: item,
+            kind: kind,
+            expectedToRemainInPlace: expectedToRemainInPlace,
+            vendorRelocationMayBePossible: vendorRelocationMayBePossible,
+            normalizedLowerPath: normalizedPath.lowercased()
+        )
+    }
 
-        if let knownGuide = knownGuides.first(where: { guide in
-            guide.folderPatterns.contains { lowerPath.contains($0) }
-        }) {
+    static nonisolated func guide(
+        for item: AudioSystemDataItem,
+        kind: AudioFolderGuidanceKind,
+        expectedToRemainInPlace: Bool,
+        vendorRelocationMayBePossible: Bool,
+        normalizedLowerPath lowerPath: String
+    ) -> VendorGuide {
+        if let knownGuide = knownGuidePatternIndex.first(where: { lowerPath.contains($0.pattern) }) {
             return knownGuide.guide
         }
 
@@ -142,6 +154,17 @@ enum VendorRelocationAdvisor {
     private struct KnownGuide: Sendable {
         let folderPatterns: [String]
         let guide: VendorGuide
+    }
+
+    private struct KnownGuidePattern: Sendable {
+        let pattern: String
+        let guide: VendorGuide
+    }
+
+    private nonisolated static let knownGuidePatternIndex: [KnownGuidePattern] = knownGuides.flatMap { knownGuide in
+        knownGuide.folderPatterns.map { pattern in
+            KnownGuidePattern(pattern: pattern, guide: knownGuide.guide)
+        }
     }
 
     private nonisolated static let knownGuides: [KnownGuide] = [

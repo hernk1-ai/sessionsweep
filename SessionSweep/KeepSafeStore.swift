@@ -60,6 +60,7 @@ final class KeepSafeStore: ObservableObject {
         refreshAvailability()
     }
 
+    @discardableResult
     func add(
         path: String,
         itemType: KeepSafeItemType? = nil,
@@ -67,18 +68,48 @@ final class KeepSafeStore: ObservableObject {
         classification: String? = nil,
         category: String? = nil,
         note: String? = nil
-    ) {
+    ) -> KeepSafeItem? {
+        do {
+            return try addPersisting(
+                path: path,
+                itemType: itemType,
+                size: size,
+                classification: classification,
+                category: category,
+                note: note
+            )
+        } catch {
+            assertionFailure("Could not save Keep Safe item: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    @discardableResult
+    func addPersisting(
+        path: String,
+        itemType: KeepSafeItemType? = nil,
+        size: Int64? = nil,
+        classification: String? = nil,
+        category: String? = nil,
+        note: String? = nil
+    ) throws -> KeepSafeItem {
         let standardized = standardize(path)
         let resolved = resolve(path)
         if let existing = item(for: standardized) ?? item(for: resolved) {
-            update(existing.id) { item in
-                item.lastSeenDate = Date()
-                item.lastKnownExists = fileExists(at: standardized) || fileExists(at: resolved)
-                item.classification = classification ?? item.classification
-                item.category = category ?? item.category
-                item.note = note ?? item.note
+            let previousItems = items
+            guard let index = items.firstIndex(where: { $0.id == existing.id }) else { return existing }
+            items[index].lastSeenDate = Date()
+            items[index].lastKnownExists = fileExists(at: standardized) || fileExists(at: resolved)
+            items[index].classification = classification ?? items[index].classification
+            items[index].category = category ?? items[index].category
+            items[index].note = note ?? items[index].note
+            do {
+                try save()
+                return items[index]
+            } catch {
+                items = previousItems
+                throw error
             }
-            return
         }
 
         let url = URL(fileURLWithPath: standardized)
@@ -99,13 +130,37 @@ final class KeepSafeStore: ObservableObject {
             category: category,
             note: note
         )
+        let previousItems = items
         items.append(item)
-        save()
+        do {
+            try save()
+            return item
+        } catch {
+            items = previousItems
+            throw error
+        }
     }
 
     func remove(id: UUID) {
+        do {
+            try removePersisting(id: id)
+        } catch {
+            assertionFailure("Could not remove Keep Safe item: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func removePersisting(id: UUID) throws -> KeepSafeItem? {
+        let previousItems = items
+        guard let item = items.first(where: { $0.id == id }) else { return nil }
         items.removeAll { $0.id == id }
-        save()
+        do {
+            try save()
+            return item
+        } catch {
+            items = previousItems
+            throw error
+        }
     }
 
     func remove(path: String) {
@@ -158,7 +213,12 @@ final class KeepSafeStore: ObservableObject {
         return item.originalPath
     }
 
+    static func standardizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
     func refreshAvailability() {
+        let previousItems = items
         var changed = false
         for index in items.indices {
             let status = availability(for: items[index])
@@ -172,10 +232,11 @@ final class KeepSafeStore: ObservableObject {
                 changed = true
             }
         }
-        if changed { save() }
+        if changed { saveOrRollback(previousItems: previousItems) }
     }
 
     func updateSeen(paths: [String: Int64]) {
+        let previousItems = items
         var changed = false
         for (path, size) in paths {
             guard let protected = item(for: path),
@@ -185,13 +246,14 @@ final class KeepSafeStore: ObservableObject {
             if size > 0 { items[index].sizeAtProtection = size }
             changed = true
         }
-        if changed { save() }
+        if changed { saveOrRollback(previousItems: previousItems) }
     }
 
     private func update(_ id: UUID, _ mutate: (inout KeepSafeItem) -> Void) {
+        let previousItems = items
         guard let index = items.firstIndex(where: { $0.id == id }) else { return }
         mutate(&items[index])
-        save()
+        saveOrRollback(previousItems: previousItems)
     }
 
     private func matches(item: KeepSafeItem, candidate: String) -> Bool {
@@ -215,7 +277,7 @@ final class KeepSafeStore: ObservableObject {
         items = (try? decoder.decode([KeepSafeItem].self, from: data)) ?? []
     }
 
-    private func save() {
+    private func save() throws {
         do {
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
@@ -224,6 +286,15 @@ final class KeepSafeStore: ObservableObject {
             let data = try encoder.encode(items)
             try data.write(to: fileURL, options: .atomic)
         } catch {
+            throw error
+        }
+    }
+
+    private func saveOrRollback(previousItems: [KeepSafeItem]) {
+        do {
+            try save()
+        } catch {
+            items = previousItems
             assertionFailure("Could not save Keep Safe items: \(error.localizedDescription)")
         }
     }
@@ -277,7 +348,7 @@ final class KeepSafeStore: ObservableObject {
     }
 
     private func standardize(_ path: String) -> String {
-        URL(fileURLWithPath: path).standardizedFileURL.path
+        Self.standardizedPath(path)
     }
 
     private func resolve(_ path: String) -> String {

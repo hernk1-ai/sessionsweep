@@ -30,7 +30,68 @@ struct StorageRecommendation: Identifiable, Sendable {
     let destination: StorageRecommendationDestination?
 }
 
+struct RelocationCandidateSummary: Sendable {
+    let path: String
+    let size: Int64
+}
+
+struct RecommendationInputSummary: Sendable {
+    let duplicateActionableBytes: Int64
+    let installerActionableBytes: Int64
+    let archiveCandidateBytes: Int64
+    let relocationCandidates: [RelocationCandidateSummary]
+    let largeOtherApplicationBytes: Int64
+    let hasVeryLargeOtherApplication: Bool
+    let protectedInfrastructureBytes: Int64
+    let protectedItemCount: Int
+}
+
 enum StorageRecommendationEngine {
+    static nonisolated func recommendations(from summary: RecommendationInputSummary) -> [StorageRecommendation] {
+        var timer = StorageRecommendationPerformanceTimer()
+        var recommendations: [StorageRecommendation] = []
+
+        if let safeCleanup = safeCleanupRecommendation(
+            duplicateBytes: summary.duplicateActionableBytes,
+            installerBytes: summary.installerActionableBytes
+        ) {
+            recommendations.append(safeCleanup)
+        }
+        timer.mark("Safe cleanup")
+
+        if let archive = archiveRecommendation(archiveCandidateBytes: summary.archiveCandidateBytes) {
+            recommendations.append(archive)
+        }
+        timer.mark("Archive candidates")
+
+        if let relocation = libraryRelocationRecommendation(candidates: summary.relocationCandidates) {
+            recommendations.append(relocation)
+        }
+        timer.mark("Vendor relocation")
+
+        if let applications = largeApplicationsRecommendation(
+            total: summary.largeOtherApplicationBytes,
+            hasVeryLargeApplication: summary.hasVeryLargeOtherApplication
+        ) {
+            recommendations.append(applications)
+        }
+        timer.mark("Large applications")
+
+        if let leaveInPlace = leaveInPlaceRecommendation(protectedInfrastructureBytes: summary.protectedInfrastructureBytes) {
+            recommendations.append(leaveInPlace)
+        }
+        timer.mark("Leave in place")
+
+        if let keepSafe = keepSafeRecommendation(protectedItemCount: summary.protectedItemCount) {
+            recommendations.append(keepSafe)
+        }
+        timer.mark("Keep Safe")
+
+        let sorted = recommendations.sorted { $0.kind.rawValue < $1.kind.rawValue }
+        timer.finish("Recommendation generation")
+        return sorted
+    }
+
     static nonisolated func recommendations(
         for result: ScanResult,
         protectedItems: [KeepSafeItem]
@@ -58,6 +119,118 @@ enum StorageRecommendationEngine {
         }
 
         return recommendations.sorted { $0.kind.rawValue < $1.kind.rawValue }
+    }
+
+    private static nonisolated func safeCleanupRecommendation(
+        duplicateBytes: Int64,
+        installerBytes: Int64
+    ) -> StorageRecommendation? {
+        let total = duplicateBytes + installerBytes
+        guard total > 0 else { return nil }
+
+        return StorageRecommendation(
+            id: .safeCleanup,
+            kind: .safeCleanup,
+            iconName: "checkmark.circle.fill",
+            title: "Safe Cleanup",
+            estimate: formatBytes(total),
+            explanation: "Duplicate files and installers appear safe to stage for review. SessionSweep keeps this recoverable by moving files to Staging first.",
+            confidence: "High Confidence",
+            actionTitle: "Review Files",
+            destination: .safeCleanup
+        )
+    }
+
+    private static nonisolated func archiveRecommendation(
+        archiveCandidateBytes total: Int64
+    ) -> StorageRecommendation? {
+        guard total >= 1_048_576_000 else { return nil }
+
+        return StorageRecommendation(
+            id: .archiveCandidates,
+            kind: .archiveCandidates,
+            iconName: "archivebox",
+            title: "Archive Candidates",
+            estimate: "Approximately \(formatBytes(total))",
+            explanation: "Older project folders may be good archive candidates. SessionSweep cannot know whether a session is complete, so review before moving anything.",
+            confidence: "Medium Confidence",
+            actionTitle: "Review Folders",
+            destination: .archiveCandidates
+        )
+    }
+
+    private static nonisolated func libraryRelocationRecommendation(
+        candidates: [RelocationCandidateSummary]
+    ) -> StorageRecommendation? {
+        let total = candidates.reduce(Int64(0)) { $0 + $1.size }
+        guard total >= 1_048_576_000 else { return nil }
+
+        return StorageRecommendation(
+            id: .libraryRelocation,
+            kind: .libraryRelocation,
+            iconName: "externaldrive",
+            title: "Vendor Library Relocation",
+            estimate: "Approximately \(formatBytes(total))",
+            explanation: "Some sample libraries appear to support relocation using official vendor tools or settings. Review vendor guidance before moving content.",
+            confidence: "Review Recommended",
+            actionTitle: "Learn More",
+            destination: .libraryRelocation
+        )
+    }
+
+    private static nonisolated func largeApplicationsRecommendation(
+        total: Int64,
+        hasVeryLargeApplication: Bool
+    ) -> StorageRecommendation? {
+        guard total >= 5_000_000_000 || hasVeryLargeApplication else { return nil }
+
+        return StorageRecommendation(
+            id: .largeApplications,
+            kind: .largeApplications,
+            iconName: "app.badge",
+            title: "Large Applications",
+            estimate: formatBytes(total),
+            explanation: "Several large applications are using significant storage. This is shown for awareness only; SessionSweep does not recommend deleting apps automatically.",
+            confidence: "Informational",
+            actionTitle: "View Applications",
+            destination: .applications
+        )
+    }
+
+    private static nonisolated func leaveInPlaceRecommendation(
+        protectedInfrastructureBytes total: Int64
+    ) -> StorageRecommendation? {
+        guard total > 0 else { return nil }
+
+        return StorageRecommendation(
+            id: .leaveInPlace,
+            kind: .leaveInPlace,
+            iconName: "lock.shield",
+            title: "Leave In Place",
+            estimate: "\(formatBytes(total)) protected infrastructure",
+            explanation: "Plugin binaries and audio system folders appear essential to installed production software. No action is required.",
+            confidence: nil,
+            actionTitle: "Why?",
+            destination: .leaveInPlace
+        )
+    }
+
+    private static nonisolated func keepSafeRecommendation(
+        protectedItemCount count: Int
+    ) -> StorageRecommendation? {
+        guard count > 0 else { return nil }
+
+        return StorageRecommendation(
+            id: .keepSafe,
+            kind: .keepSafe,
+            iconName: "lock.fill",
+            title: "Protected Files",
+            estimate: "\(count) protected item\(count == 1 ? "" : "s")",
+            explanation: "These items are currently excluded from SessionSweep cleanup recommendations until protection is removed.",
+            confidence: nil,
+            actionTitle: "View Protected Files",
+            destination: .keepSafe
+        )
     }
 
     private static nonisolated func safeCleanupRecommendation(
@@ -383,4 +556,32 @@ enum StorageRecommendationEngine {
         "output",
         "uvi",
     ]
+}
+
+private nonisolated struct StorageRecommendationPerformanceTimer {
+    private var checkpoints: [(String, Double)] = []
+    private let start = CFAbsoluteTimeGetCurrent()
+    private var last = CFAbsoluteTimeGetCurrent()
+
+    mutating func mark(_ label: String) {
+        #if DEBUG
+        let now = CFAbsoluteTimeGetCurrent()
+        checkpoints.append((label, (now - last) * 1000))
+        last = now
+        #endif
+    }
+
+    func finish(_ label: String) {
+        #if DEBUG
+        let total = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let details = checkpoints
+            .map { "  - \($0.0): \(Int($0.1.rounded())) ms" }
+            .joined(separator: "\n")
+        if details.isEmpty {
+            print("\(label) built in \(Int(total.rounded())) ms")
+        } else {
+            print("\(label) built in \(Int(total.rounded())) ms\n\(details)")
+        }
+        #endif
+    }
 }

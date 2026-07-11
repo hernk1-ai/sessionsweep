@@ -118,7 +118,7 @@ final class ScanController: ObservableObject {
     func hasChildren(_ path: String) -> Bool { !(result?.folderChildren[path]?.isEmpty ?? true) }
 }
 
-private enum StorageExplorerAudioCategory: String, CaseIterable, Hashable {
+private nonisolated enum StorageExplorerAudioCategory: String, CaseIterable, Hashable {
     case plugins = "Plugins"
     case pluginContent = "Plugin Content"
     case presets = "Presets"
@@ -167,7 +167,7 @@ private enum StorageExplorerAudioCategory: String, CaseIterable, Hashable {
     }
 }
 
-private enum StorageExplorerPersonalFolder: String, CaseIterable, Hashable {
+private nonisolated enum StorageExplorerPersonalFolder: String, CaseIterable, Hashable {
     case desktop = "Desktop"
     case documents = "Documents"
     case downloads = "Downloads"
@@ -308,6 +308,27 @@ private nonisolated struct InstallerPresentationRow: Identifiable {
     var isStageable: Bool { !isKeepSafe }
 }
 
+private nonisolated struct DuplicatePathScanPresentationRow {
+    let path: String
+    let fileSize: Int64
+    let isKeeper: Bool
+    let safetyClassification: DuplicateSafetyClassification
+}
+
+private nonisolated struct DuplicateGroupScanPresentationRow {
+    let group: DuplicateGroup
+    let keeper: String?
+    let paths: [DuplicatePathScanPresentationRow]
+}
+
+private nonisolated struct InstallerScanPresentationRow {
+    let item: SizedItem
+    let path: String
+    let displayName: String
+    let parentPath: String
+    let alreadyInstalled: Bool
+}
+
 private nonisolated struct StorageExplorerRoutePresentation {
     let route: StorageExplorerRoute
     let nodes: [StorageExplorerNode]
@@ -316,48 +337,184 @@ private nonisolated struct StorageExplorerRoutePresentation {
     let breadcrumbs: [StorageExplorerBreadcrumb]
 }
 
-private nonisolated struct ResultsPresentationModel {
-    let identity: String
+private nonisolated struct ScanDerivedPresentationData {
+    let reuseToken: UUID
     let totalSize: Int64
-    let keepSafeIndex: KeepSafeIndex
-    let recommendations: [StorageRecommendation]
     let categoryRows: [CategoryPresentationRow]
     let audioCategoryRows: [AudioCategoryPresentationRow]
     let topAudioFolders: [AudioFolderPresentationRow]
     let detectedAudioFolders: [AudioFolderPresentationRow]
     let firstRelocationCandidatePath: String?
+    let identicalContentGroups: [IdenticalContentGroupPresentation]
+    let largestAudioAssets: [SizedItem]
+    let otherLargeApplications: [SizedItem]
+    let duplicateGroups: [DuplicateGroupScanPresentationRow]
+    let installerRows: [InstallerScanPresentationRow]
+    let recommendationBaseSummary: RecommendationInputSummary
+    let result: ScanResult
+    let audioContributors: [StorageExplorerContributor]
+}
+
+private nonisolated struct ProtectionDerivedPresentationData {
+    let keepSafeRevision: String
+    let keepSafeIndex: KeepSafeIndex
+    let recommendations: [StorageRecommendation]
     let duplicateGroups: [DuplicateGroupPresentationRow]
     let duplicateActionableTotal: Int64
     let duplicateStageablePaths: Set<String>
     let duplicatePathSizes: [String: Int64]
     let recommendedDuplicateSelection: Set<String>
-    let identicalContentGroups: [IdenticalContentGroupPresentation]
     let installerRows: [InstallerPresentationRow]
     let stageableInstallerRows: [InstallerPresentationRow]
     let installerActionableTotal: Int64
     let installerStageablePaths: Set<String>
     let installerPathSizes: [String: Int64]
-    let largestAudioAssets: [SizedItem]
-    let otherLargeApplications: [SizedItem]
     let sortedKeepSafeItems: [KeepSafeItem]
-    private let result: ScanResult
-    private let audioContributors: [StorageExplorerContributor]
 
     nonisolated static func build(
-        result: ScanResult,
+        scanData: ScanDerivedPresentationData,
         keepSafeItems: [KeepSafeItem],
-        identity: String
-    ) -> ResultsPresentationModel {
+        keepSafeRevision: String
+    ) -> ProtectionDerivedPresentationData {
         var timer = ResultsPerformanceTimer()
 
         let keepSafeIndex = KeepSafeIndex(items: keepSafeItems)
         timer.mark("Keep Safe index")
 
-        let recommendations = StorageRecommendationEngine.recommendations(
-            for: result,
-            protectedItems: keepSafeItems
+        let duplicateGroups = scanData.duplicateGroups.map { group -> DuplicateGroupPresentationRow in
+            let pathRows = group.paths.map { row in
+                DuplicatePathPresentationRow(
+                    path: row.path,
+                    fileSize: row.fileSize,
+                    isKeeper: row.isKeeper,
+                    safetyClassification: row.safetyClassification,
+                    keepSafeItem: keepSafeIndex.item(for: row.path)
+                )
+            }
+            let actionableCount = pathRows.filter { !$0.isKeeper && $0.isStageable }.count
+            return DuplicateGroupPresentationRow(
+                group: group.group,
+                keeper: group.keeper,
+                actionableBytes: Int64(actionableCount) * group.group.fileSize,
+                paths: pathRows
+            )
+        }
+        let duplicateStageablePaths = Set(duplicateGroups.flatMap { $0.paths.filter(\.isStageable).map(\.path) })
+        let duplicatePathSizes = Dictionary(uniqueKeysWithValues: duplicateGroups.flatMap { group in
+            group.paths.map { ($0.path, $0.fileSize) }
+        })
+        let recommendedDuplicateSelection = Set(duplicateGroups.flatMap { group in
+            group.paths.filter { !$0.isKeeper && $0.isStageable }.map(\.path)
+        })
+        let duplicateActionableTotal = duplicateGroups.reduce(Int64(0)) { $0 + $1.actionableBytes }
+        timer.mark("Duplicate protection projection")
+
+        let installerRows = scanData.installerRows.map { row in
+            InstallerPresentationRow(
+                item: row.item,
+                path: row.path,
+                displayName: row.displayName,
+                parentPath: row.parentPath,
+                isKeepSafe: keepSafeIndex.isProtected(row.path),
+                alreadyInstalled: row.alreadyInstalled
+            )
+        }
+        let stageableInstallerRows = installerRows.filter(\.isStageable)
+        let installerActionableTotal = stageableInstallerRows.reduce(Int64(0)) { $0 + $1.item.size }
+        let installerStageablePaths = Set(stageableInstallerRows.map(\.path))
+        let installerPathSizes = Dictionary(uniqueKeysWithValues: installerRows.map { ($0.path, $0.item.size) })
+        timer.mark("Installer protection projection")
+
+        let baseSummary = scanData.recommendationBaseSummary
+        let recommendationSummary = RecommendationInputSummary(
+            duplicateActionableBytes: duplicateActionableTotal,
+            installerActionableBytes: installerActionableTotal,
+            archiveCandidateBytes: baseSummary.archiveCandidateBytes,
+            relocationCandidates: baseSummary.relocationCandidates,
+            largeOtherApplicationBytes: baseSummary.largeOtherApplicationBytes,
+            hasVeryLargeOtherApplication: baseSummary.hasVeryLargeOtherApplication,
+            protectedInfrastructureBytes: baseSummary.protectedInfrastructureBytes,
+            protectedItemCount: keepSafeItems.count
         )
+        debugLog("Protected summary refresh for revision \(keepSafeRevision)")
+        let recommendations = StorageRecommendationEngine.recommendations(from: recommendationSummary)
         timer.mark("Recommendations")
+
+        let sortedKeepSafeItems = keepSafeItems.sorted { lhs, rhs in
+            let lhsKnown = lhs.sizeAtProtection > 0
+            let rhsKnown = rhs.sizeAtProtection > 0
+            if lhsKnown != rhsKnown { return lhsKnown }
+            if lhsKnown && rhsKnown && lhs.sizeAtProtection != rhs.sizeAtProtection {
+                return lhs.sizeAtProtection > rhs.sizeAtProtection
+            }
+            if lhs.dateProtected != rhs.dateProtected {
+                return lhs.dateProtected > rhs.dateProtected
+            }
+            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
+        }
+        timer.mark("Protected item sorting")
+
+        timer.finish("Protection-only presentation refresh")
+
+        return ProtectionDerivedPresentationData(
+            keepSafeRevision: keepSafeRevision,
+            keepSafeIndex: keepSafeIndex,
+            recommendations: recommendations,
+            duplicateGroups: duplicateGroups,
+            duplicateActionableTotal: duplicateActionableTotal,
+            duplicateStageablePaths: duplicateStageablePaths,
+            duplicatePathSizes: duplicatePathSizes,
+            recommendedDuplicateSelection: recommendedDuplicateSelection,
+            installerRows: installerRows,
+            stageableInstallerRows: stageableInstallerRows,
+            installerActionableTotal: installerActionableTotal,
+            installerStageablePaths: installerStageablePaths,
+            installerPathSizes: installerPathSizes,
+            sortedKeepSafeItems: sortedKeepSafeItems
+        )
+    }
+}
+
+private nonisolated struct ResultsPresentationModel {
+    let identity: String
+    let scanData: ScanDerivedPresentationData
+    let protectionData: ProtectionDerivedPresentationData
+
+    var keepSafeRevision: String { protectionData.keepSafeRevision }
+    var totalSize: Int64 { scanData.totalSize }
+    var keepSafeIndex: KeepSafeIndex { protectionData.keepSafeIndex }
+    var recommendations: [StorageRecommendation] { protectionData.recommendations }
+    var categoryRows: [CategoryPresentationRow] { scanData.categoryRows }
+    var audioCategoryRows: [AudioCategoryPresentationRow] { scanData.audioCategoryRows }
+    var topAudioFolders: [AudioFolderPresentationRow] { scanData.topAudioFolders }
+    var detectedAudioFolders: [AudioFolderPresentationRow] { scanData.detectedAudioFolders }
+    var firstRelocationCandidatePath: String? { scanData.firstRelocationCandidatePath }
+    var duplicateGroups: [DuplicateGroupPresentationRow] { protectionData.duplicateGroups }
+    var duplicateActionableTotal: Int64 { protectionData.duplicateActionableTotal }
+    var duplicateStageablePaths: Set<String> { protectionData.duplicateStageablePaths }
+    var duplicatePathSizes: [String: Int64] { protectionData.duplicatePathSizes }
+    var recommendedDuplicateSelection: Set<String> { protectionData.recommendedDuplicateSelection }
+    var identicalContentGroups: [IdenticalContentGroupPresentation] { scanData.identicalContentGroups }
+    var installerRows: [InstallerPresentationRow] { protectionData.installerRows }
+    var stageableInstallerRows: [InstallerPresentationRow] { protectionData.stageableInstallerRows }
+    var installerActionableTotal: Int64 { protectionData.installerActionableTotal }
+    var installerStageablePaths: Set<String> { protectionData.installerStageablePaths }
+    var installerPathSizes: [String: Int64] { protectionData.installerPathSizes }
+    var largestAudioAssets: [SizedItem] { scanData.largestAudioAssets }
+    var otherLargeApplications: [SizedItem] { scanData.otherLargeApplications }
+    var sortedKeepSafeItems: [KeepSafeItem] { protectionData.sortedKeepSafeItems }
+
+    private var result: ScanResult { scanData.result }
+    private var audioContributors: [StorageExplorerContributor] { scanData.audioContributors }
+
+    nonisolated static func build(
+        result: ScanResult,
+        keepSafeItems: [KeepSafeItem],
+        identity: String,
+        keepSafeRevision: String
+    ) -> ResultsPresentationModel {
+        debugLog("Starting full scan presentation build for identity \(identity)")
+        var timer = ResultsPerformanceTimer()
 
         let categoryRows = Category.allCases
             .map { CategoryPresentationRow(category: $0, size: result.categoryTotals[$0] ?? 0) }
@@ -375,10 +532,11 @@ private nonisolated struct ResultsPresentationModel {
         })
         let topAudioFolders = result.audioSystemData.topFolders.compactMap { audioRowsByPath[$0.path] }
         let detectedAudioFolders = result.audioSystemData.items.compactMap { audioRowsByPath[$0.path] }
-        let firstRelocationCandidatePath = detectedAudioFolders
+        let relocationCandidateRows = detectedAudioFolders
             .filter {
                 $0.guidance.vendorRelocationMayBePossible
                     && !$0.guidance.expectedToRemainInPlace
+                    && relocationGuidanceKinds.contains($0.guidance.kind)
             }
             .sorted { lhs, rhs in
                 let lhsRank = relocationSupportSortRank(lhs.guidance.relocationSupport)
@@ -387,37 +545,31 @@ private nonisolated struct ResultsPresentationModel {
                 if lhs.item.size != rhs.item.size { return lhs.item.size > rhs.item.size }
                 return lhs.item.friendlyName.localizedStandardCompare(rhs.item.friendlyName) == .orderedAscending
             }
-            .first?.item.path
+        let firstRelocationCandidatePath = relocationCandidateRows.first?.item.path
+        let leaveInPlaceRows = detectedAudioFolders.filter {
+            $0.guidance.expectedToRemainInPlace
+                && $0.item.safetyStatus == .essential
+                && leaveInPlaceCategories.contains($0.item.category)
+        }
         timer.mark("Audio guidance")
 
-        let duplicateGroups = result.duplicateGroups.map { group -> DuplicateGroupPresentationRow in
+        let duplicateGroups = result.duplicateGroups.map { group -> DuplicateGroupScanPresentationRow in
             let keeper = recommendedKeeper(in: group)
             let pathRows = group.paths.map { path in
-                DuplicatePathPresentationRow(
+                DuplicatePathScanPresentationRow(
                     path: path,
                     fileSize: group.fileSize,
                     isKeeper: path == keeper,
-                    safetyClassification: DuplicateSafetyClassifier.classify(path: path),
-                    keepSafeItem: keepSafeIndex.item(for: path)
+                    safetyClassification: DuplicateSafetyClassifier.classify(path: path)
                 )
             }
-            let actionableCount = pathRows.filter { !$0.isKeeper && $0.isStageable }.count
-            return DuplicateGroupPresentationRow(
+            return DuplicateGroupScanPresentationRow(
                 group: group,
                 keeper: keeper,
-                actionableBytes: Int64(actionableCount) * group.fileSize,
                 paths: pathRows
             )
         }
-        let duplicateStageablePaths = Set(duplicateGroups.flatMap { $0.paths.filter(\.isStageable).map(\.path) })
-        let duplicatePathSizes = Dictionary(uniqueKeysWithValues: duplicateGroups.flatMap { group in
-            group.paths.map { ($0.path, $0.fileSize) }
-        })
-        let recommendedDuplicateSelection = Set(duplicateGroups.flatMap { group in
-            group.paths.filter { !$0.isKeeper && $0.isStageable }.map(\.path)
-        })
-        let duplicateActionableTotal = duplicateGroups.reduce(Int64(0)) { $0 + $1.actionableBytes }
-        timer.mark("Duplicate presentation")
+        timer.mark("Duplicate scan presentation")
 
         let identicalContentGroups = sortedIdenticalContentGroups(result.identicalContentGroups)
         timer.mark("Identical-content classification")
@@ -426,70 +578,138 @@ private nonisolated struct ResultsPresentationModel {
             .sorted { $0.size > $1.size }
             .map { item in
                 let path = item.url.path
-                return InstallerPresentationRow(
+                return InstallerScanPresentationRow(
                     item: item,
                     path: path,
                     displayName: item.displayName,
                     parentPath: item.parentPath,
-                    isKeepSafe: keepSafeIndex.isProtected(path),
                     alreadyInstalled: InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
                 )
             }
-        let stageableInstallerRows = installerRows.filter(\.isStageable)
-        let installerActionableTotal = stageableInstallerRows.reduce(Int64(0)) { $0 + $1.item.size }
-        let installerStageablePaths = Set(stageableInstallerRows.map(\.path))
-        let installerPathSizes = Dictionary(uniqueKeysWithValues: installerRows.map { ($0.path, $0.item.size) })
-        timer.mark("Installer presentation")
+        timer.mark("Installer scan presentation")
 
         let largestAudioAssets = Self.largestAudioAssets(in: result)
         let otherLargeApplications = Self.otherLargeApplications(in: result)
         timer.mark("Largest assets")
 
         let audioContributors = audioProductionContributors(in: result)
-        timer.mark("Storage Explorer base cache")
+        timer.mark("Storage Explorer contributors")
 
-        let sortedKeepSafeItems = keepSafeItems.sorted { lhs, rhs in
-            let lhsKnown = lhs.sizeAtProtection > 0
-            let rhsKnown = rhs.sizeAtProtection > 0
-            if lhsKnown != rhsKnown { return lhsKnown }
-            if lhsKnown && rhsKnown && lhs.sizeAtProtection != rhs.sizeAtProtection {
-                return lhs.sizeAtProtection > rhs.sizeAtProtection
-            }
-            if lhs.dateProtected != rhs.dateProtected {
-                return lhs.dateProtected > rhs.dateProtected
-            }
-            return lhs.displayName.localizedStandardCompare(rhs.displayName) == .orderedAscending
-        }
-        timer.mark("Protected item sorting")
+        var recommendationSummaryTimer = ResultsPerformanceTimer()
+        let archiveCandidateBytes = archiveCandidateTotal(in: result)
+        recommendationSummaryTimer.mark("Archive folders")
+        let relocationCandidates = relocationCandidateSummaries(
+            in: result,
+            audioRows: relocationCandidateRows
+        )
+        recommendationSummaryTimer.mark("Relocation folders")
+        let largeOtherApplicationBytes = otherLargeApplications.reduce(Int64(0)) { $0 + $1.size }
+        let hasVeryLargeOtherApplication = otherLargeApplications.contains { $0.size >= 2_000_000_000 }
+        recommendationSummaryTimer.mark("Application totals")
+        let protectedInfrastructureBytes = nonOverlappingPathSummaries(
+            paths: leaveInPlaceRows.map(\.item.path),
+            in: result
+        ).reduce(Int64(0)) { $0 + $1.size }
+        recommendationSummaryTimer.mark("Protected infrastructure")
+        let recommendationBaseSummary = RecommendationInputSummary(
+            duplicateActionableBytes: 0,
+            installerActionableBytes: 0,
+            archiveCandidateBytes: archiveCandidateBytes,
+            relocationCandidates: relocationCandidates,
+            largeOtherApplicationBytes: largeOtherApplicationBytes,
+            hasVeryLargeOtherApplication: hasVeryLargeOtherApplication,
+            protectedInfrastructureBytes: protectedInfrastructureBytes,
+            protectedItemCount: 0
+        )
+        recommendationSummaryTimer.finish("Recommendation summary")
+        timer.mark("Scan-derived recommendation summary")
 
-        timer.finish("Results presentation model")
-
-        return ResultsPresentationModel(
-            identity: identity,
+        let scanData = ScanDerivedPresentationData(
+            reuseToken: UUID(),
             totalSize: result.totalSize,
-            keepSafeIndex: keepSafeIndex,
-            recommendations: recommendations,
             categoryRows: categoryRows,
             audioCategoryRows: audioCategoryRows,
             topAudioFolders: topAudioFolders,
             detectedAudioFolders: detectedAudioFolders,
             firstRelocationCandidatePath: firstRelocationCandidatePath,
-            duplicateGroups: duplicateGroups,
-            duplicateActionableTotal: duplicateActionableTotal,
-            duplicateStageablePaths: duplicateStageablePaths,
-            duplicatePathSizes: duplicatePathSizes,
-            recommendedDuplicateSelection: recommendedDuplicateSelection,
             identicalContentGroups: identicalContentGroups,
-            installerRows: installerRows,
-            stageableInstallerRows: stageableInstallerRows,
-            installerActionableTotal: installerActionableTotal,
-            installerStageablePaths: installerStageablePaths,
-            installerPathSizes: installerPathSizes,
             largestAudioAssets: largestAudioAssets,
             otherLargeApplications: otherLargeApplications,
-            sortedKeepSafeItems: sortedKeepSafeItems,
+            duplicateGroups: duplicateGroups,
+            installerRows: installerRows,
+            recommendationBaseSummary: recommendationBaseSummary,
             result: result,
             audioContributors: audioContributors
+        )
+        let protectionData = ProtectionDerivedPresentationData.build(
+            scanData: scanData,
+            keepSafeItems: keepSafeItems,
+            keepSafeRevision: keepSafeRevision
+        )
+        timer.mark("Initial protection projection")
+        timer.finish("Full scan presentation model")
+
+        return ResultsPresentationModel(
+            identity: identity,
+            scanData: scanData,
+            protectionData: protectionData
+        )
+    }
+
+    nonisolated func refreshingProtection(
+        keepSafeItems: [KeepSafeItem],
+        keepSafeRevision: String
+    ) -> ResultsPresentationModel {
+        debugLog("Starting protection-only refresh for revision \(keepSafeRevision)")
+        let protectionData = ProtectionDerivedPresentationData.build(
+            scanData: scanData,
+            keepSafeItems: keepSafeItems,
+            keepSafeRevision: keepSafeRevision
+        )
+        return ResultsPresentationModel(
+            identity: identity,
+            scanData: scanData,
+            protectionData: protectionData
+        )
+    }
+}
+
+nonisolated struct ResultsProtectionSnapshot {
+    let scanReuseToken: UUID
+    let duplicateActionableTotal: Int64
+    let installerActionableTotal: Int64
+    let protectedItemCount: Int
+    let recommendationKinds: [StorageRecommendationKind]
+    let storageExplorerRootNodeIDs: [String]
+}
+
+nonisolated enum ResultsProtectionProjectionTestHarness {
+    static func refreshedSnapshot(
+        result: ScanResult,
+        initialKeepSafeItems: [KeepSafeItem],
+        refreshedKeepSafeItems: [KeepSafeItem]
+    ) -> (before: ResultsProtectionSnapshot, after: ResultsProtectionSnapshot) {
+        let model = ResultsPresentationModel.build(
+            result: result,
+            keepSafeItems: initialKeepSafeItems,
+            identity: "test-scan",
+            keepSafeRevision: "initial"
+        )
+        let refreshed = model.refreshingProtection(
+            keepSafeItems: refreshedKeepSafeItems,
+            keepSafeRevision: "refreshed"
+        )
+        return (snapshot(from: model), snapshot(from: refreshed))
+    }
+
+    private static func snapshot(from model: ResultsPresentationModel) -> ResultsProtectionSnapshot {
+        ResultsProtectionSnapshot(
+            scanReuseToken: model.scanData.reuseToken,
+            duplicateActionableTotal: model.duplicateActionableTotal,
+            installerActionableTotal: model.installerActionableTotal,
+            protectedItemCount: model.sortedKeepSafeItems.count,
+            recommendationKinds: model.recommendations.map(\.kind),
+            storageExplorerRootNodeIDs: model.routePresentation(for: .root).nodes.map(\.id)
         )
     }
 }
@@ -997,10 +1217,11 @@ private nonisolated extension ResultsPresentationModel {
     }
 
     private static func audioProductionContributors(in result: ScanResult) -> [StorageExplorerContributor] {
+        var timer = ResultsPerformanceTimer()
         var candidates: [StorageExplorerContributor] = []
 
         for item in result.audioSystemData.items {
-            let path = normalizedPath(item.path)
+            let path = item.path
             candidates.append(StorageExplorerContributor(
                 id: "audio-system-\(path)",
                 title: item.friendlyName,
@@ -1011,24 +1232,26 @@ private nonisolated extension ResultsPresentationModel {
                 priority: 100
             ))
         }
+        timer.mark("Audio system items")
 
         for (path, size) in result.folderSizes where size >= 1_048_576 {
-            let normalized = normalizedPath(path)
-            guard let category = audioCategory(forFolderPath: normalized),
-                  AudioSystemDataClassifier.classify(path: normalized) == nil else { continue }
+            let lower = path.lowercased()
+            guard let category = audioCategory(forNormalizedLowerPath: lower),
+                  AudioSystemDataClassifier.classify(path: path) == nil else { continue }
             candidates.append(StorageExplorerContributor(
-                id: "audio-folder-\(normalized)",
-                title: displayName(forPath: normalized),
+                id: "audio-folder-\(path)",
+                title: displayName(forPath: path),
                 subtitle: category.rawValue,
-                path: normalized,
+                path: path,
                 size: size,
                 category: category,
                 priority: 70
             ))
         }
+        timer.mark("Folder candidate scan")
 
         for item in result.topFiles where item.category != .applications && isAudioAsset(item) {
-            let path = normalizedPath(item.url.path)
+            let path = item.url.path
             guard let category = audioCategory(for: item) else { continue }
             candidates.append(StorageExplorerContributor(
                 id: "audio-item-\(path)",
@@ -1040,8 +1263,12 @@ private nonisolated extension ResultsPresentationModel {
                 priority: 40
             ))
         }
+        timer.mark("Top-file contributors")
 
-        return nonOverlappingContributors(candidates)
+        let contributors = nonOverlappingContributors(candidates)
+        timer.mark("Overlap pruning")
+        timer.finish("Storage Explorer preparation")
+        return contributors
     }
 
     private static func nonOverlappingContributors(
@@ -1061,6 +1288,77 @@ private nonisolated extension ResultsPresentationModel {
         return selected
     }
 
+    private static func archiveCandidateTotal(in result: ScanResult) -> Int64 {
+        nonOverlappingPathSummaries(paths: projectFolderPaths(in: result), in: result)
+            .reduce(Int64(0)) { $0 + $1.size }
+    }
+
+    private static func relocationCandidateSummaries(
+        in result: ScanResult,
+        audioRows: [AudioFolderPresentationRow]
+    ) -> [RelocationCandidateSummary] {
+        let audioSystemPaths = audioRows.map(\.item.path)
+        let libraryFolderPaths = result.folderSizes.keys.filter(isLikelyRelocatableLibraryPath)
+        return nonOverlappingPathSummaries(
+            paths: audioSystemPaths + libraryFolderPaths,
+            in: result
+        )
+    }
+
+    private static func projectFolderPaths(in result: ScanResult) -> [String] {
+        let home = normalizedPath(NSHomeDirectory())
+        let knownPaths = [
+            "\(home)/Projects",
+            "\(home)/Sessions",
+            "\(home)/Documents/Projects",
+            "\(home)/Documents/Sessions",
+            "\(home)/Music/Projects",
+            "\(home)/Music/Sessions",
+        ]
+        let detectedPaths = result.folderSizes.keys.filter { path in
+            let lower = path.lowercased()
+            guard !lower.contains("/library/application support/"),
+                  !lower.contains("/library/audio/")
+            else { return false }
+            return lower.contains("/projects/") || lower.contains("/sessions/")
+                || lower.contains("/daw projects/") || lower.contains("/logic projects/")
+        }
+        return knownPaths + detectedPaths
+    }
+
+    private static func nonOverlappingPathSummaries(
+        paths: [String],
+        in result: ScanResult
+    ) -> [RelocationCandidateSummary] {
+        let sorted = paths
+            .map(normalizedPath)
+            .filter { size(ofPath: $0, in: result) > 0 }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count < rhs.count }
+                return lhs < rhs
+            }
+
+        var selected: [String] = []
+        for path in sorted {
+            if selected.contains(where: { pathsOverlapNormalized($0, path) }) { continue }
+            selected.append(path)
+        }
+
+        return selected.map {
+            RelocationCandidateSummary(path: $0, size: size(ofPath: $0, in: result))
+        }
+    }
+
+    private static func size(ofPath path: String, in result: ScanResult) -> Int64 {
+        if let size = result.folderSizes[path] { return size }
+        let normalized = normalizedPath(path)
+        if let size = result.folderSizes[normalized] { return size }
+        if normalized == result.rootPath || normalized == normalizedPath(result.rootPath) {
+            return result.totalSize
+        }
+        return 0
+    }
+
     private static func largestAudioAssets(in result: ScanResult) -> [SizedItem] {
         result.topFiles
             .filter { Self.isAudioAsset($0) }
@@ -1077,6 +1375,18 @@ private nonisolated extension ResultsPresentationModel {
                 return !isAudioApplication(item)
             }
             .sorted { $0.size > $1.size }
+    }
+
+    private static func isLikelyRelocatableLibraryPath(_ path: String) -> Bool {
+        let lower = path.lowercased()
+        guard lower.contains("/sample") || lower.contains("/library") || lower.contains("/libraries")
+            || lower.contains("/content") || lower.contains("/expansion") || lower.contains("/loops")
+            || lower.contains("/steam") || lower.contains("/kontakt") || lower.contains("/toontrack")
+        else { return false }
+
+        return relocatableVendorMarkers.contains { lower.contains($0) }
+            || lower.contains("/sample libraries/")
+            || lower.contains("/sample library/")
     }
 
     private static func isAudioAsset(_ item: SizedItem) -> Bool {
@@ -1132,7 +1442,10 @@ private nonisolated extension ResultsPresentationModel {
     }
 
     private static func audioCategory(forFolderPath path: String) -> StorageExplorerAudioCategory? {
-        let lower = normalizedPath(path).lowercased()
+        audioCategory(forNormalizedLowerPath: normalizedPath(path).lowercased())
+    }
+
+    private static func audioCategory(forNormalizedLowerPath lower: String) -> StorageExplorerAudioCategory? {
         if lower.contains("/library/audio/plug-ins/") { return .plugins }
         if lower.contains("/library/audio/presets/") { return .presets }
         if lower.contains("/library/audio/impulse responses/") { return .impulseResponses }
@@ -1303,6 +1616,37 @@ private nonisolated extension ResultsPresentationModel {
         "sample librar", "/samples/", "/loops/", "/stems/", "/bounces/", "/mixes/",
         "/masters/", "/renders/", "/sessions/", "/daw projects/", "/logic projects/",
     ]
+
+    private static let relocationGuidanceKinds: Set<AudioFolderGuidanceKind> = [
+        .contentLibrary,
+        .sampleLibrary,
+        .impulseResponseLibrary,
+    ]
+
+    private static let leaveInPlaceCategories: Set<AudioSystemDataCategory> = [
+        .plugins,
+        .presets,
+        .pluginContent,
+    ]
+
+    private static let relocatableVendorMarkers = [
+        "native instruments",
+        "kontakt",
+        "nexus",
+        "refx",
+        "omnisphere",
+        "spectrasonics",
+        "steam",
+        "xln audio",
+        "toontrack",
+        "superior drummer",
+        "ezdrummer",
+        "slate trigger",
+        "eastwest",
+        "spitfire",
+        "output",
+        "uvi",
+    ]
 }
 
 private struct ActionToast: Identifiable, Equatable {
@@ -1336,6 +1680,12 @@ private nonisolated struct ResultsPerformanceTimer {
         }
         #endif
     }
+}
+
+private nonisolated func debugLog(_ message: @autoclosure () -> String) {
+    #if DEBUG
+    print(message())
+    #endif
 }
 
 private nonisolated struct KeepSafeIndex {
@@ -1494,7 +1844,7 @@ private extension View {
     }
 }
 
-private extension Array where Element: Hashable {
+private nonisolated extension Array where Element: Hashable {
     func removingDuplicates() -> [Element] {
         var seen = Set<Element>()
         return filter { seen.insert($0).inserted }
@@ -1518,7 +1868,11 @@ struct ContentView: View {
     @State private var resultsPresentationBuildTask: Task<Void, Never>?
     @State private var pendingResultsPresentationIdentity: String?
     @State private var pendingResultsPresentationShouldSelectDuplicates = false
-    @State private var suppressNextKeepSafePresentationRebuild = false
+    @State private var protectionRefreshTask: Task<Void, Never>?
+    @State private var pendingProtectionRefreshRevision: String?
+    @State private var suppressNextKeepSafeProtectionRefresh = false
+    @State private var keepSafePathsInProgress: Set<String> = []
+    @State private var keepSafeItemIDsInProgress: Set<UUID> = []
     @State private var pendingRemoveKeepSafeItem: KeepSafeItem?
     @State private var actionToast: ActionToast?
     @State private var isMovingToStaging = false
@@ -1571,19 +1925,18 @@ struct ContentView: View {
             storageExplorerRoute = .root
             let keepSafeIdentityBeforeRefresh = keepSafePresentationIdentity()
             refreshKeepSafeFromCurrentScan()
-            suppressNextKeepSafePresentationRebuild = keepSafePresentationIdentity() != keepSafeIdentityBeforeRefresh
+            suppressNextKeepSafeProtectionRefresh = keepSafePresentationIdentity() != keepSafeIdentityBeforeRefresh
             refreshStaging()
             rebuildResultsPresentationModel(selectRecommendedDuplicates: true)
             selectedInstallerPaths.removeAll()
         }
-        .onChange(of: keepSafePresentationIdentity()) { _ in
-            if suppressNextKeepSafePresentationRebuild {
-                suppressNextKeepSafePresentationRebuild = false
+        .onChange(of: keepSafePresentationIdentity()) { revision in
+            if suppressNextKeepSafeProtectionRefresh {
+                suppressNextKeepSafeProtectionRefresh = false
                 pruneSelectionsAgainstPresentationModel()
                 return
             }
-            rebuildResultsPresentationModel(selectRecommendedDuplicates: false)
-            pruneSelectionsAgainstPresentationModel()
+            refreshProtectionPresentationModel(keepSafeRevision: revision)
         }
         .alert(item: $appAlert) { alert in
             Alert(
@@ -1810,7 +2163,7 @@ struct ContentView: View {
     }
 
     private func resultsPresentationIdentity(for result: ScanResult) -> String {
-        scanResultExpansionIdentity(result) + "|" + keepSafePresentationIdentity()
+        scanResultExpansionIdentity(result)
     }
 
     private func keepSafePresentationIdentity() -> String {
@@ -1835,8 +2188,11 @@ struct ContentView: View {
         guard let result = controller.result else {
             resultsPresentationBuildTask?.cancel()
             resultsPresentationBuildTask = nil
+            protectionRefreshTask?.cancel()
+            protectionRefreshTask = nil
             pendingResultsPresentationIdentity = nil
             pendingResultsPresentationShouldSelectDuplicates = false
+            pendingProtectionRefreshRevision = nil
             resultsPresentationModel = nil
             selectedDuplicatePaths.removeAll()
             selectedInstallerPaths.removeAll()
@@ -1858,15 +2214,20 @@ struct ContentView: View {
         }
 
         resultsPresentationBuildTask?.cancel()
+        protectionRefreshTask?.cancel()
+        protectionRefreshTask = nil
+        pendingProtectionRefreshRevision = nil
         pendingResultsPresentationIdentity = identity
         pendingResultsPresentationShouldSelectDuplicates = selectRecommendedDuplicates
 
         let keepSafeItems = keepSafeStore.items
+        let keepSafeRevision = keepSafePresentationIdentity()
         resultsPresentationBuildTask = Task.detached(priority: .userInitiated) {
             let model = ResultsPresentationModel.build(
                 result: result,
                 keepSafeItems: keepSafeItems,
-                identity: identity
+                identity: identity,
+                keepSafeRevision: keepSafeRevision
             )
 
             guard !Task.isCancelled else { return }
@@ -1876,6 +2237,14 @@ struct ContentView: View {
                       resultsPresentationIdentity(for: currentResult) == identity else {
                     pendingResultsPresentationIdentity = nil
                     pendingResultsPresentationShouldSelectDuplicates = false
+                    return
+                }
+                guard keepSafePresentationIdentity() == keepSafeRevision else {
+                    let shouldRetrySelectingDuplicates = pendingResultsPresentationShouldSelectDuplicates || selectRecommendedDuplicates
+                    pendingResultsPresentationIdentity = nil
+                    pendingResultsPresentationShouldSelectDuplicates = false
+                    resultsPresentationBuildTask = nil
+                    rebuildResultsPresentationModel(selectRecommendedDuplicates: shouldRetrySelectingDuplicates)
                     return
                 }
 
@@ -1892,10 +2261,55 @@ struct ContentView: View {
         }
     }
 
+    private func refreshProtectionPresentationModel(keepSafeRevision: String) {
+        guard let model = resultsPresentationModel,
+              let result = controller.result,
+              model.identity == resultsPresentationIdentity(for: result)
+        else {
+            rebuildResultsPresentationModel(selectRecommendedDuplicates: false)
+            return
+        }
+
+        if model.keepSafeRevision == keepSafeRevision {
+            pruneSelectionsAgainstPresentationModel()
+            return
+        }
+
+        protectionRefreshTask?.cancel()
+        pendingProtectionRefreshRevision = keepSafeRevision
+        let keepSafeItems = keepSafeStore.items
+        protectionRefreshTask = Task.detached(priority: .userInitiated) {
+            let refreshedModel = model.refreshingProtection(
+                keepSafeItems: keepSafeItems,
+                keepSafeRevision: keepSafeRevision
+            )
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard pendingProtectionRefreshRevision == keepSafeRevision else { return }
+                guard let currentResult = controller.result,
+                      resultsPresentationIdentity(for: currentResult) == refreshedModel.identity,
+                      keepSafePresentationIdentity() == keepSafeRevision else {
+                    pendingProtectionRefreshRevision = nil
+                    protectionRefreshTask = nil
+                    return
+                }
+                resultsPresentationModel = refreshedModel
+                pendingProtectionRefreshRevision = nil
+                protectionRefreshTask = nil
+                pruneSelectionsAgainstPresentationModel()
+            }
+        }
+    }
+
     private func pruneSelectionsAgainstPresentationModel() {
         guard let model = resultsPresentationModel else { return }
-        selectedDuplicatePaths = selectedDuplicatePaths.filter { model.duplicateStageablePaths.contains($0) }
-        selectedInstallerPaths = selectedInstallerPaths.filter { model.installerStageablePaths.contains($0) }
+        selectedDuplicatePaths = selectedDuplicatePaths.filter {
+            model.duplicateStageablePaths.contains($0) && !isKeepSafePathInProgress($0)
+        }
+        selectedInstallerPaths = selectedInstallerPaths.filter {
+            model.installerStageablePaths.contains($0) && !isKeepSafePathInProgress($0)
+        }
     }
 
     @ViewBuilder
@@ -2131,6 +2545,7 @@ struct ContentView: View {
         let status = keepSafeStore.availability(for: item)
         let currentPath = keepSafeStore.currentPath(for: item)
         let guidance = keepSafeGuidance(for: item, currentPath: currentPath)
+        let isBusy = isKeepSafeOperationInProgress(path: currentPath, protectedItem: item)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
@@ -2147,11 +2562,19 @@ struct ContentView: View {
                         .foregroundStyle(status == .available ? Color.secondary : Color.orange)
                 }
                 Spacer()
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 12, height: 12)
+                        .accessibilityLabel("Updating Keep Safe")
+                }
                 Menu {
                     Button("Reveal in Finder") { revealKeepSafeItem(item) }
                     Button("Copy Path") { copyPath(currentPath) }
                     Divider()
-                    Button("Remove from Keep Safe") { pendingRemoveKeepSafeItem = item }
+                    Button(isBusy ? "Removing..." : "Remove from Keep Safe") { pendingRemoveKeepSafeItem = item }
+                        .disabled(isBusy)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .iconActionControl(help: "More actions")
@@ -2781,7 +3204,9 @@ struct ContentView: View {
     }
 
     private func duplicatesSection(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
-        let selectedPaths = selectedDuplicatePaths.intersection(model.duplicateStageablePaths)
+        let selectedPaths = selectedDuplicatePaths
+            .intersection(model.duplicateStageablePaths)
+            .filter { !isKeepSafePathInProgress($0) }
         let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.duplicatePathSizes[$1] ?? 0) }
         let selectedCount = selectedPaths.count
         let actionableReclaimable = model.duplicateActionableTotal
@@ -2899,12 +3324,14 @@ struct ContentView: View {
     private func duplicatePathRow(_ row: DuplicatePathPresentationRow) -> some View {
         let path = row.path
         let safetyClassification = row.safetyClassification
-        let isSelected = selectedDuplicatePaths.contains(path) && row.isStageable
+        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: row.keepSafeItem)
+        let isStageable = row.isStageable && !isBusy
+        let isSelected = selectedDuplicatePaths.contains(path) && isStageable
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) && row.isStageable },
+                get: { selectedDuplicatePaths.contains(path) && isStageable },
                 set: { checked in
-                    if checked && row.isStageable {
+                    if checked && isStageable {
                         selectedDuplicatePaths.insert(path)
                     } else {
                         selectedDuplicatePaths.remove(path)
@@ -2913,7 +3340,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(!row.isStageable)
+            .disabled(!isStageable)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(path)
@@ -2932,6 +3359,7 @@ struct ContentView: View {
                 .foregroundStyle(.tertiary)
             keepSafeButton(
                 path: path,
+                protectedItem: row.keepSafeItem,
                 itemType: .file,
                 size: row.fileSize,
                 classification: safetyClassification.label,
@@ -2943,7 +3371,9 @@ struct ContentView: View {
 
     private func installersSection(model: ResultsPresentationModel) -> some View {
         let sorted = model.installerRows
-        let selectedPaths = selectedInstallerPaths.intersection(model.installerStageablePaths)
+        let selectedPaths = selectedInstallerPaths
+            .intersection(model.installerStageablePaths)
+            .filter { !isKeepSafePathInProgress($0) }
         let total = model.installerActionableTotal
         let selectedCount = selectedPaths.count
         let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.installerPathSizes[$1] ?? 0) }
@@ -3009,13 +3439,16 @@ struct ContentView: View {
     private func installerRow(_ row: InstallerPresentationRow) -> some View {
         let item = row.item
         let path = row.path
-        let isSelected = selectedInstallerPaths.contains(path) && row.isStageable
+        let protectedItem = resultsPresentationModel?.keepSafeIndex.item(for: path)
+        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: protectedItem)
+        let isStageable = row.isStageable && !isBusy
+        let isSelected = selectedInstallerPaths.contains(path) && isStageable
         let alreadyInstalled = row.alreadyInstalled
         return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Toggle("", isOn: Binding(
-                get: { selectedInstallerPaths.contains(path) && row.isStageable },
+                get: { selectedInstallerPaths.contains(path) && isStageable },
                 set: { checked in
-                    if checked && row.isStageable {
+                    if checked && isStageable {
                         selectedInstallerPaths.insert(path)
                     } else {
                         selectedInstallerPaths.remove(path)
@@ -3024,7 +3457,7 @@ struct ContentView: View {
             ))
             .labelsHidden()
             .toggleStyle(.checkbox)
-            .disabled(!row.isStageable)
+            .disabled(!isStageable)
 
             Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
 
@@ -3052,6 +3485,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             keepSafeButton(
                 path: path,
+                protectedItem: protectedItem,
                 itemType: .file,
                 size: item.size,
                 classification: alreadyInstalled ? "Installer already installed" : "Installer",
@@ -3214,7 +3648,9 @@ struct ContentView: View {
         fileSize: Int64,
         sharedParent: String?
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        let protectedItem = keepSafeStore.protectedItem(for: path)
+        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: protectedItem)
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "doc").foregroundStyle(.secondary).font(.caption)
             VStack(alignment: .leading, spacing: 1) {
                 Text(URL(fileURLWithPath: path).lastPathComponent)
@@ -3232,6 +3668,13 @@ struct ContentView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 80, alignment: .trailing)
+            if isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.62)
+                    .frame(width: 12, height: 12)
+                    .accessibilityLabel("Protecting")
+            }
             Menu {
                 keepSafeMenuButton(
                     path: path,
@@ -4578,13 +5021,16 @@ struct ContentView: View {
     @ViewBuilder
     private func keepSafeButton(
         path: String,
+        protectedItem: KeepSafeItem?,
         itemType: KeepSafeItemType?,
         size: Int64,
         classification: String?,
         category: String?
     ) -> some View {
-        let protectedItem = keepSafeStore.protectedItem(for: path)
+        let protectedItem = protectedItem ?? keepSafeStore.protectedItem(for: path)
+        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: protectedItem)
         Button {
+            guard !isBusy else { return }
             if let protectedItem {
                 pendingRemoveKeepSafeItem = protectedItem
             } else {
@@ -4597,18 +5043,29 @@ struct ContentView: View {
                 )
             }
         } label: {
-            Label("Keep Safe", systemImage: protectedItem == nil ? "lock" : "lock.fill")
-                .font(.caption.weight(.medium))
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .contentShape(Rectangle())
+            HStack(spacing: 5) {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.62)
+                        .frame(width: 12, height: 12)
+                } else {
+                    Image(systemName: protectedItem == nil ? "lock" : "lock.fill")
+                }
+                Text(isBusy ? "Protecting..." : "Keep Safe")
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .foregroundStyle(protectedItem == nil ? Color.secondary : Color.teal)
+        .foregroundStyle(protectedItem == nil && !isBusy ? Color.secondary : Color.teal)
         .interactiveHover(isSelected: protectedItem != nil, cornerRadius: 7, tint: .teal)
-        .pointerCursor()
+        .disabled(isBusy)
+        .pointerCursor(!isBusy)
         .help(protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe")
-        .accessibilityLabel(protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe")
+        .accessibilityLabel(isBusy ? "Protecting" : (protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe"))
     }
 
     @ViewBuilder
@@ -4619,7 +5076,12 @@ struct ContentView: View {
         classification: String?,
         category: String?
     ) -> some View {
-        if let protectedItem = keepSafeStore.protectedItem(for: path) {
+        let protectedItem = keepSafeStore.protectedItem(for: path)
+        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: protectedItem)
+        if isBusy {
+            Button("Protecting...") {}
+                .disabled(true)
+        } else if let protectedItem {
             Button("Remove from Keep Safe") {
                 pendingRemoveKeepSafeItem = protectedItem
             }
@@ -4643,25 +5105,91 @@ struct ContentView: View {
         classification: String?,
         category: String?
     ) {
-        keepSafeStore.add(
-            path: path,
-            itemType: itemType,
-            size: size,
-            classification: classification,
-            category: category
-        )
-        selectedDuplicatePaths = selectedDuplicatePaths.filter(isStageableDuplicatePath)
-        selectedInstallerPaths = selectedInstallerPaths.filter(isStageableInstallerPath)
-        showToast("Added to Keep Safe")
+        let pathKey = keepSafeOperationPathKey(path)
+        guard !keepSafePathsInProgress.contains(pathKey) else { return }
+        debugLog("Local Keep Safe persistence starting for \(pathKey)")
+        keepSafePathsInProgress.insert(pathKey)
+        selectedDuplicatePaths.remove(path)
+        selectedInstallerPaths.remove(path)
+        pruneSelectionsAgainstPresentationModel()
+
+        Task { @MainActor in
+            await Task.yield()
+            do {
+                _ = try keepSafeStore.addPersisting(
+                    path: path,
+                    itemType: itemType,
+                    size: size,
+                    classification: classification,
+                    category: category
+                )
+                debugLog("Local Keep Safe persistence finished for \(pathKey)")
+                selectedDuplicatePaths = selectedDuplicatePaths.filter(isStageableDuplicatePath)
+                selectedInstallerPaths = selectedInstallerPaths.filter(isStageableInstallerPath)
+                showToast("Added to Keep Safe")
+            } catch {
+                appAlert = AppAlert(
+                    title: "Could Not Keep Safe",
+                    message: "SessionSweep could not save this Keep Safe change. Nothing was moved or deleted.\n\n\(error.localizedDescription)"
+                )
+            }
+            keepSafePathsInProgress.remove(pathKey)
+            pruneSelectionsAgainstPresentationModel()
+        }
     }
 
     private func removeKeepSafe(_ item: KeepSafeItem) {
-        keepSafeStore.remove(id: item.id)
+        let pathKeys = keepSafeOperationPathKeys(for: item)
+        guard !keepSafeItemIDsInProgress.contains(item.id) else { return }
+        debugLog("Local Keep Safe removal starting for \(item.id)")
+        keepSafeItemIDsInProgress.insert(item.id)
+        keepSafePathsInProgress.formUnion(pathKeys)
         selectedDuplicatePaths.remove(item.originalPath)
         selectedDuplicatePaths.remove(item.resolvedPath)
         selectedInstallerPaths.remove(item.originalPath)
         selectedInstallerPaths.remove(item.resolvedPath)
-        showToast("Removed from Keep Safe")
+        pruneSelectionsAgainstPresentationModel()
+
+        Task { @MainActor in
+            await Task.yield()
+            do {
+                _ = try keepSafeStore.removePersisting(id: item.id)
+                debugLog("Local Keep Safe removal finished for \(item.id)")
+                showToast("Removed from Keep Safe")
+            } catch {
+                appAlert = AppAlert(
+                    title: "Could Not Remove Keep Safe",
+                    message: "SessionSweep could not save this Keep Safe change. The item remains protected.\n\n\(error.localizedDescription)"
+                )
+            }
+            keepSafeItemIDsInProgress.remove(item.id)
+            keepSafePathsInProgress.subtract(pathKeys)
+            pruneSelectionsAgainstPresentationModel()
+        }
+    }
+
+    private func keepSafeOperationPathKey(_ path: String) -> String {
+        KeepSafeStore.standardizedPath(path)
+    }
+
+    private func keepSafeOperationPathKeys(for item: KeepSafeItem) -> Set<String> {
+        [
+            keepSafeOperationPathKey(item.originalPath),
+            keepSafeOperationPathKey(item.resolvedPath)
+        ]
+    }
+
+    private func isKeepSafeOperationInProgress(
+        path: String,
+        protectedItem: KeepSafeItem?
+    ) -> Bool {
+        if isKeepSafePathInProgress(path) { return true }
+        guard let protectedItem else { return false }
+        return keepSafeItemIDsInProgress.contains(protectedItem.id)
+    }
+
+    private func isKeepSafePathInProgress(_ path: String) -> Bool {
+        keepSafePathsInProgress.contains(keepSafeOperationPathKey(path))
     }
 
     private func revealKeepSafeItem(_ item: KeepSafeItem) {
@@ -4704,6 +5232,7 @@ struct ContentView: View {
     }
 
     private func isStageableInstallerPath(_ path: String) -> Bool {
+        if isKeepSafePathInProgress(path) { return false }
         if let model = resultsPresentationModel {
             return model.installerStageablePaths.contains(path)
         }
@@ -4783,9 +5312,10 @@ struct ContentView: View {
     }
 
     private func selectAllDuplicates(_ r: ScanResult) {
-        selectedDuplicatePaths = resultsPresentationModel?.duplicateStageablePaths ?? Set(r.duplicateGroups.flatMap { group in
+        let candidates = resultsPresentationModel?.duplicateStageablePaths ?? Set(r.duplicateGroups.flatMap { group in
             group.paths.filter(isStageableDuplicatePath)
         })
+        selectedDuplicatePaths = candidates.filter { !isKeepSafePathInProgress($0) }
         showToast("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected")
     }
 
@@ -4795,7 +5325,7 @@ struct ContentView: View {
     }
 
     private func selectAllInstallers(_ items: [InstallerPresentationRow]) {
-        selectedInstallerPaths = Set(items.filter(\.isStageable).map(\.path))
+        selectedInstallerPaths = Set(items.filter { $0.isStageable && !isKeepSafePathInProgress($0.path) }.map(\.path))
         showToast("\(selectedInstallerPaths.count) installer\(selectedInstallerPaths.count == 1 ? "" : "s") selected")
     }
 
@@ -4813,6 +5343,7 @@ struct ContentView: View {
     }
 
     private func isStageableDuplicatePath(_ path: String) -> Bool {
+        if isKeepSafePathInProgress(path) { return false }
         if let model = resultsPresentationModel {
             return model.duplicateStageablePaths.contains(path)
         }
