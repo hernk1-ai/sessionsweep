@@ -22,8 +22,70 @@ final class KeepSafeProtectionTests: XCTestCase {
         XCTAssertEqual(snapshots.after.duplicateActionableTotal, 0)
         XCTAssertEqual(snapshots.after.installerActionableTotal, 0)
         XCTAssertEqual(snapshots.after.protectedItemCount, 2)
+        XCTAssertEqual(snapshots.before.scanDataObjectID, snapshots.after.scanDataObjectID)
         XCTAssertEqual(snapshots.before.scanReuseToken, snapshots.after.scanReuseToken)
         XCTAssertEqual(snapshots.before.storageExplorerRootNodeIDs, snapshots.after.storageExplorerRootNodeIDs)
+    }
+
+    func testProtectionRefreshKeepsRowIdentityStable() {
+        let duplicatePath = "/Users/test/Downloads/original copy.wav"
+        let installerPath = "/Users/test/Downloads/Example.dmg"
+        let result = makeScanResult(duplicatePath: duplicatePath, installerPath: installerPath)
+        let protectedItems = [
+            makeKeepSafeItem(path: duplicatePath, size: 1_500_000, category: "Duplicate File"),
+            makeKeepSafeItem(path: installerPath, size: 20_000_000, category: "Installers"),
+        ]
+
+        let snapshots = ResultsProtectionProjectionTestHarness.refreshedSnapshot(
+            result: result,
+            initialKeepSafeItems: [],
+            refreshedKeepSafeItems: protectedItems
+        )
+
+        XCTAssertEqual(snapshots.before.duplicateGroupIDs, snapshots.after.duplicateGroupIDs)
+        XCTAssertEqual(snapshots.before.duplicatePathIDs, snapshots.after.duplicatePathIDs)
+        XCTAssertEqual(snapshots.before.installerRowIDs, snapshots.after.installerRowIDs)
+    }
+
+    @MainActor
+    func testPathSelectionAccountingUpdatesIncrementallyAndPrunesAgainstStageablePaths() {
+        let selection = PathSelectionState()
+        selection.configure(
+            stageablePaths: ["/a.wav", "/b.wav"],
+            byteSizes: [
+                "/a.wav": 10,
+                "/b.wav": 30,
+            ]
+        )
+
+        selection.insert("/a.wav")
+        XCTAssertEqual(selection.selectedPaths, ["/a.wav"])
+        XCTAssertEqual(selection.selectedCount, 1)
+        XCTAssertEqual(selection.selectedBytes, 10)
+
+        selection.insert("/b.wav")
+        XCTAssertEqual(selection.selectedCount, 2)
+        XCTAssertEqual(selection.selectedBytes, 40)
+
+        selection.remove("/a.wav")
+        XCTAssertEqual(selection.selectedPaths, ["/b.wav"])
+        XCTAssertEqual(selection.selectedCount, 1)
+        XCTAssertEqual(selection.selectedBytes, 30)
+
+        selection.setSelection(
+            ["/a.wav", "/b.wav"],
+            blockedPathKeys: [KeepSafeStore.standardizedPath("/b.wav")]
+        )
+        XCTAssertEqual(selection.selectedPaths, ["/a.wav"])
+        XCTAssertEqual(selection.selectedBytes, 10)
+
+        selection.configure(
+            stageablePaths: ["/b.wav"],
+            byteSizes: ["/b.wav": 30]
+        )
+        XCTAssertTrue(selection.selectedPaths.isEmpty)
+        XCTAssertEqual(selection.selectedCount, 0)
+        XCTAssertEqual(selection.selectedBytes, 0)
     }
 
     func testRecommendationOutputUpdatesAfterKeepSafeChange() {

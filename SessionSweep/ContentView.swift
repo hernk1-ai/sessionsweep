@@ -265,6 +265,7 @@ private nonisolated struct AudioFolderPresentationRow: Identifiable {
 
 private nonisolated struct DuplicatePathPresentationRow: Identifiable {
     let path: String
+    let pathKey: String
     let fileSize: Int64
     let isKeeper: Bool
     let safetyClassification: DuplicateSafetyClassification
@@ -299,17 +300,20 @@ private nonisolated struct IdenticalContentGroupPresentation: Identifiable {
 private nonisolated struct InstallerPresentationRow: Identifiable {
     let item: SizedItem
     let path: String
+    let pathKey: String
     let displayName: String
     let parentPath: String
-    let isKeepSafe: Bool
+    let keepSafeItem: KeepSafeItem?
     let alreadyInstalled: Bool
 
     var id: String { path }
+    var isKeepSafe: Bool { keepSafeItem != nil }
     var isStageable: Bool { !isKeepSafe }
 }
 
 private nonisolated struct DuplicatePathScanPresentationRow {
     let path: String
+    let pathKey: String
     let fileSize: Int64
     let isKeeper: Bool
     let safetyClassification: DuplicateSafetyClassification
@@ -324,6 +328,7 @@ private nonisolated struct DuplicateGroupScanPresentationRow {
 private nonisolated struct InstallerScanPresentationRow {
     let item: SizedItem
     let path: String
+    let pathKey: String
     let displayName: String
     let parentPath: String
     let alreadyInstalled: Bool
@@ -337,7 +342,9 @@ private nonisolated struct StorageExplorerRoutePresentation {
     let breadcrumbs: [StorageExplorerBreadcrumb]
 }
 
-private nonisolated struct ScanDerivedPresentationData {
+// Immutable reference storage keeps large scan-derived arrays and dictionaries out of
+// SwiftUI's value-copy path when small local UI state, such as selection, changes.
+private nonisolated final class ScanDerivedPresentationData: @unchecked Sendable {
     let reuseToken: UUID
     let totalSize: Int64
     let categoryRows: [CategoryPresentationRow]
@@ -353,9 +360,45 @@ private nonisolated struct ScanDerivedPresentationData {
     let recommendationBaseSummary: RecommendationInputSummary
     let result: ScanResult
     let audioContributors: [StorageExplorerContributor]
+
+    init(
+        reuseToken: UUID,
+        totalSize: Int64,
+        categoryRows: [CategoryPresentationRow],
+        audioCategoryRows: [AudioCategoryPresentationRow],
+        topAudioFolders: [AudioFolderPresentationRow],
+        detectedAudioFolders: [AudioFolderPresentationRow],
+        firstRelocationCandidatePath: String?,
+        identicalContentGroups: [IdenticalContentGroupPresentation],
+        largestAudioAssets: [SizedItem],
+        otherLargeApplications: [SizedItem],
+        duplicateGroups: [DuplicateGroupScanPresentationRow],
+        installerRows: [InstallerScanPresentationRow],
+        recommendationBaseSummary: RecommendationInputSummary,
+        result: ScanResult,
+        audioContributors: [StorageExplorerContributor]
+    ) {
+        self.reuseToken = reuseToken
+        self.totalSize = totalSize
+        self.categoryRows = categoryRows
+        self.audioCategoryRows = audioCategoryRows
+        self.topAudioFolders = topAudioFolders
+        self.detectedAudioFolders = detectedAudioFolders
+        self.firstRelocationCandidatePath = firstRelocationCandidatePath
+        self.identicalContentGroups = identicalContentGroups
+        self.largestAudioAssets = largestAudioAssets
+        self.otherLargeApplications = otherLargeApplications
+        self.duplicateGroups = duplicateGroups
+        self.installerRows = installerRows
+        self.recommendationBaseSummary = recommendationBaseSummary
+        self.result = result
+        self.audioContributors = audioContributors
+    }
 }
 
-private nonisolated struct ProtectionDerivedPresentationData {
+// Immutable reference storage for protection projections prevents local interaction
+// updates from structurally copying large duplicate and installer row arrays.
+private nonisolated final class ProtectionDerivedPresentationData: @unchecked Sendable {
     let keepSafeRevision: String
     let keepSafeIndex: KeepSafeIndex
     let recommendations: [StorageRecommendation]
@@ -371,6 +414,38 @@ private nonisolated struct ProtectionDerivedPresentationData {
     let installerPathSizes: [String: Int64]
     let sortedKeepSafeItems: [KeepSafeItem]
 
+    init(
+        keepSafeRevision: String,
+        keepSafeIndex: KeepSafeIndex,
+        recommendations: [StorageRecommendation],
+        duplicateGroups: [DuplicateGroupPresentationRow],
+        duplicateActionableTotal: Int64,
+        duplicateStageablePaths: Set<String>,
+        duplicatePathSizes: [String: Int64],
+        recommendedDuplicateSelection: Set<String>,
+        installerRows: [InstallerPresentationRow],
+        stageableInstallerRows: [InstallerPresentationRow],
+        installerActionableTotal: Int64,
+        installerStageablePaths: Set<String>,
+        installerPathSizes: [String: Int64],
+        sortedKeepSafeItems: [KeepSafeItem]
+    ) {
+        self.keepSafeRevision = keepSafeRevision
+        self.keepSafeIndex = keepSafeIndex
+        self.recommendations = recommendations
+        self.duplicateGroups = duplicateGroups
+        self.duplicateActionableTotal = duplicateActionableTotal
+        self.duplicateStageablePaths = duplicateStageablePaths
+        self.duplicatePathSizes = duplicatePathSizes
+        self.recommendedDuplicateSelection = recommendedDuplicateSelection
+        self.installerRows = installerRows
+        self.stageableInstallerRows = stageableInstallerRows
+        self.installerActionableTotal = installerActionableTotal
+        self.installerStageablePaths = installerStageablePaths
+        self.installerPathSizes = installerPathSizes
+        self.sortedKeepSafeItems = sortedKeepSafeItems
+    }
+
     nonisolated static func build(
         scanData: ScanDerivedPresentationData,
         keepSafeItems: [KeepSafeItem],
@@ -385,10 +460,11 @@ private nonisolated struct ProtectionDerivedPresentationData {
             let pathRows = group.paths.map { row in
                 DuplicatePathPresentationRow(
                     path: row.path,
+                    pathKey: row.pathKey,
                     fileSize: row.fileSize,
                     isKeeper: row.isKeeper,
                     safetyClassification: row.safetyClassification,
-                    keepSafeItem: keepSafeIndex.item(for: row.path)
+                    keepSafeItem: keepSafeIndex.item(forNormalizedPath: row.pathKey)
                 )
             }
             let actionableCount = pathRows.filter { !$0.isKeeper && $0.isStageable }.count
@@ -413,9 +489,10 @@ private nonisolated struct ProtectionDerivedPresentationData {
             InstallerPresentationRow(
                 item: row.item,
                 path: row.path,
+                pathKey: row.pathKey,
                 displayName: row.displayName,
                 parentPath: row.parentPath,
-                isKeepSafe: keepSafeIndex.isProtected(row.path),
+                keepSafeItem: keepSafeIndex.item(forNormalizedPath: row.pathKey),
                 alreadyInstalled: row.alreadyInstalled
             )
         }
@@ -475,10 +552,22 @@ private nonisolated struct ProtectionDerivedPresentationData {
     }
 }
 
-private nonisolated struct ResultsPresentationModel {
+// Immutable reference model so refreshing local UI state does not copy the large
+// scan-derived/protection-derived presentation payloads.
+private nonisolated final class ResultsPresentationModel: @unchecked Sendable {
     let identity: String
     let scanData: ScanDerivedPresentationData
     let protectionData: ProtectionDerivedPresentationData
+
+    init(
+        identity: String,
+        scanData: ScanDerivedPresentationData,
+        protectionData: ProtectionDerivedPresentationData
+    ) {
+        self.identity = identity
+        self.scanData = scanData
+        self.protectionData = protectionData
+    }
 
     var keepSafeRevision: String { protectionData.keepSafeRevision }
     var totalSize: Int64 { scanData.totalSize }
@@ -558,6 +647,7 @@ private nonisolated struct ResultsPresentationModel {
             let pathRows = group.paths.map { path in
                 DuplicatePathScanPresentationRow(
                     path: path,
+                    pathKey: KeepSafeStore.standardizedPath(path),
                     fileSize: group.fileSize,
                     isKeeper: path == keeper,
                     safetyClassification: DuplicateSafetyClassifier.classify(path: path)
@@ -581,6 +671,7 @@ private nonisolated struct ResultsPresentationModel {
                 return InstallerScanPresentationRow(
                     item: item,
                     path: path,
+                    pathKey: KeepSafeStore.standardizedPath(path),
                     displayName: item.displayName,
                     parentPath: item.parentPath,
                     alreadyInstalled: InstalledAppMatcher.isLikelyAlreadyInstalled(installerURL: item.url)
@@ -675,11 +766,15 @@ private nonisolated struct ResultsPresentationModel {
 }
 
 nonisolated struct ResultsProtectionSnapshot {
+    let scanDataObjectID: ObjectIdentifier
     let scanReuseToken: UUID
     let duplicateActionableTotal: Int64
     let installerActionableTotal: Int64
     let protectedItemCount: Int
     let recommendationKinds: [StorageRecommendationKind]
+    let duplicateGroupIDs: [DuplicateGroup.ID]
+    let duplicatePathIDs: [String]
+    let installerRowIDs: [String]
     let storageExplorerRootNodeIDs: [String]
 }
 
@@ -704,11 +799,15 @@ nonisolated enum ResultsProtectionProjectionTestHarness {
 
     private static func snapshot(from model: ResultsPresentationModel) -> ResultsProtectionSnapshot {
         ResultsProtectionSnapshot(
+            scanDataObjectID: ObjectIdentifier(model.scanData),
             scanReuseToken: model.scanData.reuseToken,
             duplicateActionableTotal: model.duplicateActionableTotal,
             installerActionableTotal: model.installerActionableTotal,
             protectedItemCount: model.sortedKeepSafeItems.count,
             recommendationKinds: model.recommendations.map(\.kind),
+            duplicateGroupIDs: model.duplicateGroups.map(\.id),
+            duplicatePathIDs: model.duplicateGroups.flatMap { $0.paths.map(\.id) },
+            installerRowIDs: model.installerRows.map(\.id),
             storageExplorerRootNodeIDs: model.routePresentation(for: .root).nodes.map(\.id)
         )
     }
@@ -1717,6 +1816,10 @@ private nonisolated struct KeepSafeIndex {
 
     func item(for path: String) -> KeepSafeItem? {
         let normalized = Self.normalize(path)
+        return item(forNormalizedPath: normalized)
+    }
+
+    func item(forNormalizedPath normalized: String) -> KeepSafeItem? {
         if let item = exactItemsByPath[normalized] { return item }
         return folderPrefixes.first { entry in
             normalized == entry.prefix || normalized.hasPrefix(entry.prefix + "/")
@@ -1744,6 +1847,103 @@ private enum ResultSectionID: Hashable {
     case staging
     case storageExplorer
     case largestAudioAssets
+}
+
+@MainActor
+final class PathSelectionState: ObservableObject {
+    let objectWillChange = ObservableObjectPublisher()
+
+    private(set) var selectedPaths: Set<String> = []
+    private(set) var selectedCount = 0
+    private(set) var selectedBytes: Int64 = 0
+
+    private var stageablePaths: Set<String> = []
+    private var byteSizes: [String: Int64] = [:]
+
+    func configure(
+        stageablePaths: Set<String>,
+        byteSizes: [String: Int64],
+        blockedPathKeys: Set<String> = []
+    ) {
+        self.stageablePaths = stageablePaths
+        self.byteSizes = byteSizes
+        prune(blockedPathKeys: blockedPathKeys)
+    }
+
+    func setSelection(_ paths: Set<String>, blockedPathKeys: Set<String> = []) {
+        let filtered = Set(paths.lazy.filter { self.isStageable($0, blockedPathKeys: blockedPathKeys) })
+        replaceSelection(with: filtered)
+    }
+
+    func setSelected(_ path: String, _ isSelected: Bool) {
+        if isSelected {
+            insert(path)
+        } else {
+            remove(path)
+        }
+    }
+
+    func insert(_ path: String) {
+        guard stageablePaths.contains(path), !selectedPaths.contains(path) else { return }
+        objectWillChange.send()
+        selectedPaths.insert(path)
+        selectedCount += 1
+        selectedBytes += byteSizes[path] ?? 0
+    }
+
+    func remove(_ path: String) {
+        guard selectedPaths.contains(path) else { return }
+        objectWillChange.send()
+        selectedPaths.remove(path)
+        selectedCount -= 1
+        selectedBytes -= byteSizes[path] ?? 0
+    }
+
+    func subtract(_ paths: Set<String>) {
+        let removed = selectedPaths.intersection(paths)
+        guard !removed.isEmpty else { return }
+        objectWillChange.send()
+        selectedPaths.subtract(removed)
+        selectedCount = selectedPaths.count
+        selectedBytes -= bytes(for: removed)
+    }
+
+    func removeAll() {
+        guard !selectedPaths.isEmpty || selectedCount != 0 || selectedBytes != 0 else { return }
+        objectWillChange.send()
+        selectedPaths.removeAll()
+        selectedCount = 0
+        selectedBytes = 0
+    }
+
+    func contains(_ path: String) -> Bool {
+        selectedPaths.contains(path)
+    }
+
+    func prune(blockedPathKeys: Set<String> = []) {
+        let filtered = Set(selectedPaths.lazy.filter { self.isStageable($0, blockedPathKeys: blockedPathKeys) })
+        replaceSelection(with: filtered)
+    }
+
+    private func isStageable(_ path: String, blockedPathKeys: Set<String>) -> Bool {
+        guard stageablePaths.contains(path) else { return false }
+        guard !blockedPathKeys.isEmpty else { return true }
+        return !blockedPathKeys.contains(KeepSafeStore.standardizedPath(path))
+    }
+
+    private func replaceSelection(with paths: Set<String>) {
+        let newCount = paths.count
+        let newBytes = bytes(for: paths)
+        guard selectedPaths != paths || selectedCount != newCount || selectedBytes != newBytes else { return }
+        objectWillChange.send()
+        selectedPaths = paths
+        selectedCount = newCount
+        selectedBytes = newBytes
+    }
+
+    private func bytes(for paths: Set<String>) -> Int64 {
+        paths.reduce(Int64(0)) { $0 + (byteSizes[$1] ?? 0) }
+    }
 }
 
 private struct PointerCursorModifier: ViewModifier {
@@ -1844,6 +2044,369 @@ private extension View {
     }
 }
 
+private struct DuplicateResultsSection<GroupRow: View, IdenticalRow: View>: View {
+    let hasDuplicateGroups: Bool
+    let duplicateGroups: [DuplicateGroupPresentationRow]
+    let identicalContentGroups: [IdenticalContentGroupPresentation]
+    let actionableReclaimable: Int64
+    let selection: PathSelectionState
+    @Binding var expandedResultListIDs: Set<String>
+    let isMovingToStaging: Bool
+    let selectAll: () -> Void
+    let deselectAll: () -> Void
+    let moveSelected: () -> Void
+    let groupRow: (DuplicateGroupPresentationRow) -> GroupRow
+    let identicalRow: (IdenticalContentGroupPresentation) -> IdenticalRow
+    let human: (Int64) -> String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Duplicate files").font(.headline)
+                    Spacer()
+                    if actionableReclaimable > 0 {
+                        Text("\(human(actionableReclaimable)) reclaimable")
+                            .font(.callout.weight(.semibold)).foregroundStyle(.teal)
+                    }
+                }
+                if !hasDuplicateGroups {
+                    Text("No confident duplicates over 1 MB (same name and identical content).")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Text("Same filename and byte-for-byte identical. SessionSweep preselects likely redundant copies, but you can change any checkbox before moving files.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    DuplicateSelectionControls(
+                        selection: selection,
+                        isMovingToStaging: isMovingToStaging,
+                        selectAll: selectAll,
+                        deselectAll: deselectAll,
+                        moveSelected: moveSelected,
+                        human: human
+                    )
+
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(duplicateGroups) { groupRow($0) }
+                    }
+                }
+            }
+
+            if !identicalContentGroups.isEmpty {
+                let listID = "identical-content-groups"
+                let compactCount = 10
+                let visibleGroups = visibleItems(
+                    identicalContentGroups,
+                    compactCount: compactCount,
+                    listID: listID
+                )
+                let hiddenCount = max(0, identicalContentGroups.count - compactCount)
+
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Identical content, different names", systemImage: "exclamationmark.triangle.fill")
+                        .font(.headline).foregroundStyle(.orange)
+                    Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(visibleGroups) { identicalRow($0) }
+                    }
+                    expandableToggle(
+                        listID: listID,
+                        hiddenCount: hiddenCount,
+                        itemSingular: "group",
+                        itemPlural: "groups",
+                        expandedLabel: "Hide additional groups",
+                        accessibilityCollapsedLabel: "Show \(hiddenCount) more identical-content group\(hiddenCount == 1 ? "" : "s")",
+                        accessibilityExpandedLabel: "Hide additional identical-content groups"
+                    )
+                }
+            }
+        }
+    }
+
+    private func visibleItems<Item>(
+        _ items: [Item],
+        compactCount: Int,
+        listID: String
+    ) -> [Item] {
+        guard compactCount > 0,
+              items.count > compactCount,
+              !expandedResultListIDs.contains(listID)
+        else { return items }
+        return Array(items.prefix(compactCount))
+    }
+
+    @ViewBuilder
+    private func expandableToggle(
+        listID: String,
+        hiddenCount: Int,
+        itemSingular: String,
+        itemPlural: String,
+        expandedLabel: String,
+        accessibilityCollapsedLabel: String,
+        accessibilityExpandedLabel: String
+    ) -> some View {
+        if hiddenCount > 0 {
+            let isExpanded = expandedResultListIDs.contains(listID)
+            let collapsedTitle = "Show \(hiddenCount) more \(hiddenCount == 1 ? itemSingular : itemPlural)"
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    if isExpanded {
+                        expandedResultListIDs.remove(listID)
+                    } else {
+                        expandedResultListIDs.insert(listID)
+                    }
+                }
+            } label: {
+                Label(isExpanded ? expandedLabel : collapsedTitle,
+                      systemImage: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.teal)
+            .interactiveHover(isSelected: isExpanded, cornerRadius: 7, tint: .teal)
+            .pointerCursor()
+            .help(isExpanded ? expandedLabel : collapsedTitle)
+            .accessibilityLabel(isExpanded ? accessibilityExpandedLabel : accessibilityCollapsedLabel)
+        }
+    }
+}
+
+private struct DuplicateSelectionControls: View {
+    @ObservedObject var selection: PathSelectionState
+    let isMovingToStaging: Bool
+    let selectAll: () -> Void
+    let deselectAll: () -> Void
+    let moveSelected: () -> Void
+    let human: (Int64) -> String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Button("Select All") { selectAll() }
+                    .buttonStyle(.borderless)
+                    .subtleTextAction(help: "Select all duplicate files")
+                Button("Deselect All") { deselectAll() }
+                    .buttonStyle(.borderless)
+                    .subtleTextAction(help: "Clear duplicate file selection")
+                Spacer()
+            }
+
+            if selection.selectedCount > 0 {
+                HStack(spacing: 10) {
+                    Button { moveSelected() } label: {
+                        Label(isMovingToStaging ? "Moving..." : "Move to Staging",
+                              systemImage: isMovingToStaging ? "hourglass" : "tray.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isMovingToStaging)
+                    .pointerCursor(!isMovingToStaging)
+                    .help("Move selected duplicate files to SessionSweep Staging")
+
+                    Text("\(selection.selectedCount) file\(selection.selectedCount == 1 ? "" : "s") selected · \(human(selection.selectedBytes))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+}
+
+private struct DuplicatePathResultRow<KeepSafeControl: View>: View {
+    let row: DuplicatePathPresentationRow
+    let isBusy: Bool
+    @ObservedObject var selection: PathSelectionState
+    let recommendationLabel: (Bool, DuplicateSafetyClassification) -> String
+    let recommendationDescription: (Bool, DuplicateSafetyClassification) -> String
+    let keepSafeControl: () -> KeepSafeControl
+    let human: (Int64) -> String
+
+    var body: some View {
+        let path = row.path
+        let safetyClassification = row.safetyClassification
+        let isStageable = row.isStageable && !isBusy
+        let isSelected = selection.contains(path) && isStageable
+
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { selection.contains(path) && isStageable },
+                set: { selection.setSelected(path, $0 && isStageable) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .disabled(!isStageable)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(path)
+                    .font(.caption2)
+                    .foregroundStyle(isSelected ? .primary : .tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(recommendationLabel(row.isKeeper, safetyClassification))
+                    .font(.caption2)
+                    .foregroundStyle((row.isKeeper || row.isNeverRecommend || row.isKeepSafe) ? Color.secondary : Color.teal)
+                    .help(recommendationDescription(row.isKeeper, safetyClassification))
+            }
+            Spacer()
+            Text(human(row.fileSize))
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+            keepSafeControl()
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct InstallerResultsSection<RowContent: View>: View {
+    let rows: [InstallerPresentationRow]
+    let total: Int64
+    let selection: PathSelectionState
+    let isMovingInstallersToStaging: Bool
+    let selectAll: () -> Void
+    let deselectAll: () -> Void
+    let moveSelected: () -> Void
+    let rowContent: (InstallerPresentationRow) -> RowContent
+    let human: (Int64) -> String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Installers").font(.headline)
+                Spacer()
+                if total > 0 {
+                    Text("\(human(total)) reclaimable")
+                        .font(.callout.weight(.semibold)).foregroundStyle(.teal)
+                }
+            }
+
+            if rows.isEmpty {
+                Text("No leftover app installers found.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                Text("App installers (.dmg, .pkg) left over after setup. Once an app is in Applications, its installer is safe to remove. SessionSweep flags installers whose app is already installed.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                InstallerSelectionControls(
+                    selection: selection,
+                    isMovingInstallersToStaging: isMovingInstallersToStaging,
+                    selectAll: selectAll,
+                    deselectAll: deselectAll,
+                    moveSelected: moveSelected,
+                    human: human
+                )
+
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(rows) { rowContent($0) }
+                }
+            }
+        }
+    }
+}
+
+private struct InstallerSelectionControls: View {
+    @ObservedObject var selection: PathSelectionState
+    let isMovingInstallersToStaging: Bool
+    let selectAll: () -> Void
+    let deselectAll: () -> Void
+    let moveSelected: () -> Void
+    let human: (Int64) -> String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                Button("Select All") { selectAll() }
+                    .buttonStyle(.borderless)
+                    .subtleTextAction(help: "Select all stageable installers")
+                Button("Deselect All") { deselectAll() }
+                    .buttonStyle(.borderless)
+                    .subtleTextAction(help: "Clear installer selection")
+                Spacer()
+            }
+
+            if selection.selectedCount > 0 {
+                HStack(spacing: 10) {
+                    Button { moveSelected() } label: {
+                        Label(isMovingInstallersToStaging ? "Moving..." : "Move to Staging",
+                              systemImage: isMovingInstallersToStaging ? "hourglass" : "tray.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isMovingInstallersToStaging)
+                    .pointerCursor(!isMovingInstallersToStaging)
+                    .help("Move selected installers to SessionSweep Staging")
+
+                    Text("\(selection.selectedCount) file\(selection.selectedCount == 1 ? "" : "s") selected · \(human(selection.selectedBytes))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+}
+
+private struct InstallerResultRow<KeepSafeControl: View>: View {
+    let row: InstallerPresentationRow
+    let isBusy: Bool
+    @ObservedObject var selection: PathSelectionState
+    let keepSafeControl: () -> KeepSafeControl
+    let human: (Int64) -> String
+
+    var body: some View {
+        let item = row.item
+        let path = row.path
+        let isStageable = row.isStageable && !isBusy
+        let isSelected = selection.contains(path) && isStageable
+        let alreadyInstalled = row.alreadyInstalled
+
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Toggle("", isOn: Binding(
+                get: { selection.contains(path) && isStageable },
+                set: { selection.setSelected(path, $0 && isStageable) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.checkbox)
+            .disabled(!isStageable)
+
+            Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.displayName)
+                    .fontWeight(.medium)
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if alreadyInstalled {
+                    Text("App already in Applications — safe to remove")
+                        .font(.caption2)
+                        .foregroundStyle(row.isKeepSafe ? Color.secondary : Color.teal)
+                } else {
+                    Text(row.parentPath)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+            Text(human(item.size))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            keepSafeControl()
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 private nonisolated extension Array where Element: Hashable {
     func removingDuplicates() -> [Element] {
         var seen = Set<Element>()
@@ -1856,8 +2419,8 @@ struct ContentView: View {
 
     @StateObject private var controller = ScanController()
     @StateObject private var keepSafeStore = KeepSafeStore.shared
-    @State private var selectedDuplicatePaths: Set<String> = []
-    @State private var selectedInstallerPaths: Set<String> = []
+    @State private var duplicateSelection = PathSelectionState()
+    @State private var installerSelection = PathSelectionState()
     @State private var stagedFiles: [StagedFile] = []
     @State private var appAlert: AppAlert?
     @State private var showOtherLargeApplications = false
@@ -1928,7 +2491,7 @@ struct ContentView: View {
             suppressNextKeepSafeProtectionRefresh = keepSafePresentationIdentity() != keepSafeIdentityBeforeRefresh
             refreshStaging()
             rebuildResultsPresentationModel(selectRecommendedDuplicates: true)
-            selectedInstallerPaths.removeAll()
+            installerSelection.removeAll()
         }
         .onChange(of: keepSafePresentationIdentity()) { revision in
             if suppressNextKeepSafeProtectionRefresh {
@@ -2090,7 +2653,7 @@ struct ContentView: View {
     private func resultsView(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 28) {
+                LazyVStack(alignment: .leading, spacing: 28) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(human(r.totalSize))
                             .font(.system(size: 46, weight: .bold, design: .rounded))
@@ -2158,8 +2721,10 @@ struct ContentView: View {
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         content()
             .padding(18)
-            .background(Color.secondary.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.secondary.opacity(0.06))
+            )
     }
 
     private func resultsPresentationIdentity(for result: ScanResult) -> String {
@@ -2194,15 +2759,19 @@ struct ContentView: View {
             pendingResultsPresentationShouldSelectDuplicates = false
             pendingProtectionRefreshRevision = nil
             resultsPresentationModel = nil
-            selectedDuplicatePaths.removeAll()
-            selectedInstallerPaths.removeAll()
+            duplicateSelection.configure(stageablePaths: [], byteSizes: [:])
+            installerSelection.configure(stageablePaths: [], byteSizes: [:])
             return
         }
 
         let identity = resultsPresentationIdentity(for: result)
         if let model = resultsPresentationModel, model.identity == identity {
+            configureSelectionModels(for: model)
             if selectRecommendedDuplicates {
-                selectedDuplicatePaths = model.recommendedDuplicateSelection
+                duplicateSelection.setSelection(
+                    model.recommendedDuplicateSelection,
+                    blockedPathKeys: keepSafePathsInProgress
+                )
             }
             pruneSelectionsAgainstPresentationModel()
             return
@@ -2253,8 +2822,12 @@ struct ContentView: View {
                 pendingResultsPresentationIdentity = nil
                 pendingResultsPresentationShouldSelectDuplicates = false
                 resultsPresentationBuildTask = nil
+                configureSelectionModels(for: model)
                 if shouldSelectDuplicates {
-                    selectedDuplicatePaths = model.recommendedDuplicateSelection
+                    duplicateSelection.setSelection(
+                        model.recommendedDuplicateSelection,
+                        blockedPathKeys: keepSafePathsInProgress
+                    )
                 }
                 pruneSelectionsAgainstPresentationModel()
             }
@@ -2297,19 +2870,32 @@ struct ContentView: View {
                 resultsPresentationModel = refreshedModel
                 pendingProtectionRefreshRevision = nil
                 protectionRefreshTask = nil
+                configureSelectionModels(for: refreshedModel)
                 pruneSelectionsAgainstPresentationModel()
             }
         }
     }
 
+    private func configureSelectionModels(for model: ResultsPresentationModel) {
+        duplicateSelection.configure(
+            stageablePaths: model.duplicateStageablePaths,
+            byteSizes: model.duplicatePathSizes,
+            blockedPathKeys: keepSafePathsInProgress
+        )
+        installerSelection.configure(
+            stageablePaths: model.installerStageablePaths,
+            byteSizes: model.installerPathSizes,
+            blockedPathKeys: keepSafePathsInProgress
+        )
+    }
+
     private func pruneSelectionsAgainstPresentationModel() {
-        guard let model = resultsPresentationModel else { return }
-        selectedDuplicatePaths = selectedDuplicatePaths.filter {
-            model.duplicateStageablePaths.contains($0) && !isKeepSafePathInProgress($0)
+        guard let model = resultsPresentationModel else {
+            duplicateSelection.configure(stageablePaths: [], byteSizes: [:])
+            installerSelection.configure(stageablePaths: [], byteSizes: [:])
+            return
         }
-        selectedInstallerPaths = selectedInstallerPaths.filter {
-            model.installerStageablePaths.contains($0) && !isKeepSafePathInProgress($0)
-        }
+        configureSelectionModels(for: model)
     }
 
     @ViewBuilder
@@ -3204,105 +3790,26 @@ struct ContentView: View {
     }
 
     private func duplicatesSection(_ r: ScanResult, model: ResultsPresentationModel) -> some View {
-        let selectedPaths = selectedDuplicatePaths
-            .intersection(model.duplicateStageablePaths)
-            .filter { !isKeepSafePathInProgress($0) }
-        let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.duplicatePathSizes[$1] ?? 0) }
-        let selectedCount = selectedPaths.count
-        let actionableReclaimable = model.duplicateActionableTotal
-        return VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Duplicate files").font(.headline)
-                    Spacer()
-                    if actionableReclaimable > 0 {
-                        Text("\(human(actionableReclaimable)) reclaimable")
-                            .font(.callout.weight(.semibold)).foregroundStyle(.teal)
-                    }
-                }
-                if r.duplicateGroups.isEmpty {
-                    Text("No confident duplicates over 1 MB (same name and identical content).")
-                        .font(.callout).foregroundStyle(.secondary)
-                } else {
-                    Text("Same filename and byte-for-byte identical. SessionSweep preselects likely redundant copies, but you can change any checkbox before moving files.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 12) {
-                    Button("Select All") { selectAllDuplicates(r) }
-                        .buttonStyle(.borderless)
-                        .subtleTextAction(help: "Select all duplicate files")
-                    Button("Deselect All") { deselectAllDuplicates() }
-                        .buttonStyle(.borderless)
-                        .subtleTextAction(help: "Clear duplicate file selection")
-                    Spacer()
-                }
-
-                    if selectedCount > 0 {
-                        HStack(spacing: 10) {
-                            Button { moveSelectedToStaging() } label: {
-                                Label(isMovingToStaging ? "Moving..." : "Move to Staging",
-                                      systemImage: isMovingToStaging ? "hourglass" : "tray.and.arrow.down")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isMovingToStaging)
-                            .pointerCursor(!isMovingToStaging)
-                            .help("Move selected duplicate files to SessionSweep Staging")
-
-                            Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                        }
-                        .padding(.vertical, 2)
-                    }
-
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.duplicateGroups) { confidentRow($0) }
-                    }
-                }
-            }
-
-            if !model.identicalContentGroups.isEmpty {
-                let identicalContentGroupsListID = "identical-content-groups"
-                let identicalContentGroupLimit = 10
-                let visibleIdenticalContentGroups = visibleResultItems(
-                    model.identicalContentGroups,
-                    compactCount: identicalContentGroupLimit,
-                    listID: identicalContentGroupsListID
-                )
-                let hiddenIdenticalContentGroupCount = hiddenResultItemCount(
-                    model.identicalContentGroups,
-                    compactCount: identicalContentGroupLimit
-                )
-
-                Divider()
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Identical content, different names", systemImage: "exclamationmark.triangle.fill")
-                        .font(.headline).foregroundStyle(.orange)
-                    Text("These files are byte-for-byte identical but have different names. SessionSweep adds audio-aware context, but this section is informational only and is not counted as reclaimable cleanup.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(visibleIdenticalContentGroups) { item in
-                            identicalRow(item.group, classification: item.classification, sharedParent: item.sharedParent)
-                        }
-                    }
-                    expandableResultListToggle(
-                        listID: identicalContentGroupsListID,
-                        hiddenCount: hiddenIdenticalContentGroupCount,
-                        itemSingular: "group",
-                        itemPlural: "groups",
-                        expandedLabel: "Hide additional groups",
-                        accessibilityCollapsedLabel: "Show \(hiddenIdenticalContentGroupCount) more identical-content group\(hiddenIdenticalContentGroupCount == 1 ? "" : "s")",
-                        accessibilityExpandedLabel: "Hide additional identical-content groups"
-                    )
-                }
-            }
-        }
+        DuplicateResultsSection(
+            hasDuplicateGroups: !r.duplicateGroups.isEmpty,
+            duplicateGroups: model.duplicateGroups,
+            identicalContentGroups: model.identicalContentGroups,
+            actionableReclaimable: model.duplicateActionableTotal,
+            selection: duplicateSelection,
+            expandedResultListIDs: $expandedResultListIDs,
+            isMovingToStaging: isMovingToStaging,
+            selectAll: { selectAllDuplicates(r) },
+            deselectAll: { deselectAllDuplicates() },
+            moveSelected: { moveSelectedToStaging() },
+            groupRow: { confidentRow($0, selection: duplicateSelection) },
+            identicalRow: { item in
+                identicalRow(item.group, classification: item.classification, sharedParent: item.sharedParent)
+            },
+            human: human
+        )
     }
 
-    private func confidentRow(_ row: DuplicateGroupPresentationRow) -> some View {
+    private func confidentRow(_ row: DuplicateGroupPresentationRow, selection: PathSelectionState) -> some View {
         let g = row.group
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -3315,184 +3822,69 @@ struct ContentView: View {
                     .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
             }
             ForEach(row.paths) { pathRow in
-                duplicatePathRow(pathRow)
+                duplicatePathRow(pathRow, selection: selection)
             }
         }
         .padding(.vertical, 4)
     }
 
-    private func duplicatePathRow(_ row: DuplicatePathPresentationRow) -> some View {
+    private func duplicatePathRow(_ row: DuplicatePathPresentationRow, selection: PathSelectionState) -> some View {
         let path = row.path
         let safetyClassification = row.safetyClassification
-        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: row.keepSafeItem)
-        let isStageable = row.isStageable && !isBusy
-        let isSelected = selectedDuplicatePaths.contains(path) && isStageable
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Toggle("", isOn: Binding(
-                get: { selectedDuplicatePaths.contains(path) && isStageable },
-                set: { checked in
-                    if checked && isStageable {
-                        selectedDuplicatePaths.insert(path)
-                    } else {
-                        selectedDuplicatePaths.remove(path)
-                    }
-                }
-            ))
-            .labelsHidden()
-            .toggleStyle(.checkbox)
-            .disabled(!isStageable)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(path)
-                    .font(.caption2)
-                    .foregroundStyle(isSelected ? .primary : .tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(duplicateRecommendationLabel(isKeeper: row.isKeeper, safetyClassification: safetyClassification))
-                    .font(.caption2)
-                    .foregroundStyle((row.isKeeper || row.isNeverRecommend || row.isKeepSafe) ? Color.secondary : Color.teal)
-                    .help(duplicateRecommendationDescription(isKeeper: row.isKeeper, safetyClassification: safetyClassification))
-            }
-            Spacer()
-            Text(human(row.fileSize))
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-            keepSafeButton(
-                path: path,
-                protectedItem: row.keepSafeItem,
-                itemType: .file,
-                size: row.fileSize,
-                classification: safetyClassification.label,
-                category: "Duplicate File"
-            )
-        }
-        .padding(.vertical, 2)
+        let isBusy = isKeepSafeOperationInProgress(pathKey: row.pathKey, protectedItem: row.keepSafeItem)
+        return DuplicatePathResultRow(
+            row: row,
+            isBusy: isBusy,
+            selection: selection,
+            recommendationLabel: duplicateRecommendationLabel,
+            recommendationDescription: duplicateRecommendationDescription,
+            keepSafeControl: {
+                keepSafeButton(
+                    path: path,
+                    protectedItem: row.keepSafeItem,
+                    itemType: .file,
+                    size: row.fileSize,
+                    classification: safetyClassification.label,
+                    category: "Duplicate File"
+                )
+            },
+            human: human
+        )
     }
 
     private func installersSection(model: ResultsPresentationModel) -> some View {
-        let sorted = model.installerRows
-        let selectedPaths = selectedInstallerPaths
-            .intersection(model.installerStageablePaths)
-            .filter { !isKeepSafePathInProgress($0) }
-        let total = model.installerActionableTotal
-        let selectedCount = selectedPaths.count
-        let selectedBytes = selectedPaths.reduce(Int64(0)) { $0 + (model.installerPathSizes[$1] ?? 0) }
-
-        return VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Installers").font(.headline)
-                Spacer()
-                if total > 0 {
-                    Text("\(human(total)) reclaimable")
-                        .font(.callout.weight(.semibold)).foregroundStyle(.teal)
-                }
-            }
-
-            if sorted.isEmpty {
-                Text("No leftover app installers found.")
-                    .font(.callout).foregroundStyle(.secondary)
-            } else {
-                Text("App installers (.dmg, .pkg) left over after setup. Once an app is in Applications, its installer is safe to remove. SessionSweep flags installers whose app is already installed.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack(spacing: 12) {
-                    Button("Select All") { selectAllInstallers(model.stageableInstallerRows) }
-                        .buttonStyle(.borderless)
-                        .subtleTextAction(help: "Select all stageable installers")
-                    Button("Deselect All") { deselectAllInstallers() }
-                        .buttonStyle(.borderless)
-                        .subtleTextAction(help: "Clear installer selection")
-                    Spacer()
-                }
-
-                if selectedCount > 0 {
-                    HStack(spacing: 10) {
-                        Button { moveSelectedInstallersToStaging() } label: {
-                            Label(isMovingInstallersToStaging ? "Moving..." : "Move to Staging",
-                                  systemImage: isMovingInstallersToStaging ? "hourglass" : "tray.and.arrow.down")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isMovingInstallersToStaging)
-                        .pointerCursor(!isMovingInstallersToStaging)
-                        .help("Move selected installers to SessionSweep Staging")
-
-                        Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                    }
-                    .padding(.vertical, 2)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
-                        ForEach(sorted) { item in
-                            installerRow(item)
-                        }
-                    }
-                }
-            }
-        }
+        InstallerResultsSection(
+            rows: model.installerRows,
+            total: model.installerActionableTotal,
+            selection: installerSelection,
+            isMovingInstallersToStaging: isMovingInstallersToStaging,
+            selectAll: { selectAllInstallers(model.stageableInstallerRows) },
+            deselectAll: { deselectAllInstallers() },
+            moveSelected: { moveSelectedInstallersToStaging() },
+            rowContent: { installerRow($0, selection: installerSelection) },
+            human: human
+        )
     }
 
-    private func installerRow(_ row: InstallerPresentationRow) -> some View {
-        let item = row.item
+    private func installerRow(_ row: InstallerPresentationRow, selection: PathSelectionState) -> some View {
         let path = row.path
-        let protectedItem = resultsPresentationModel?.keepSafeIndex.item(for: path)
-        let isBusy = isKeepSafeOperationInProgress(path: path, protectedItem: protectedItem)
-        let isStageable = row.isStageable && !isBusy
-        let isSelected = selectedInstallerPaths.contains(path) && isStageable
-        let alreadyInstalled = row.alreadyInstalled
-        return HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Toggle("", isOn: Binding(
-                get: { selectedInstallerPaths.contains(path) && isStageable },
-                set: { checked in
-                    if checked && isStageable {
-                        selectedInstallerPaths.insert(path)
-                    } else {
-                        selectedInstallerPaths.remove(path)
-                    }
-                }
-            ))
-            .labelsHidden()
-            .toggleStyle(.checkbox)
-            .disabled(!isStageable)
-
-            Image(systemName: "shippingbox").foregroundStyle(.pink).font(.caption)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(row.displayName)
-                    .fontWeight(.medium)
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if alreadyInstalled {
-                    Text("App already in Applications — safe to remove")
-                        .font(.caption2)
-                        .foregroundStyle(row.isKeepSafe ? Color.secondary : Color.teal)
-                } else {
-                    Text(row.parentPath)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            Spacer()
-            Text(human(item.size))
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-            keepSafeButton(
-                path: path,
-                protectedItem: protectedItem,
-                itemType: .file,
-                size: item.size,
-                classification: alreadyInstalled ? "Installer already installed" : "Installer",
-                category: Category.installers.displayName
-            )
-        }
-        .padding(.vertical, 2)
+        let isBusy = isKeepSafeOperationInProgress(pathKey: row.pathKey, protectedItem: row.keepSafeItem)
+        return InstallerResultRow(
+            row: row,
+            isBusy: isBusy,
+            selection: selection,
+            keepSafeControl: {
+                keepSafeButton(
+                    path: path,
+                    protectedItem: row.keepSafeItem,
+                    itemType: .file,
+                    size: row.item.size,
+                    classification: row.alreadyInstalled ? "Installer already installed" : "Installer",
+                    category: Category.installers.displayName
+                )
+            },
+            human: human
+        )
     }
 
     private func stagingSection() -> some View {
@@ -5109,8 +5501,8 @@ struct ContentView: View {
         guard !keepSafePathsInProgress.contains(pathKey) else { return }
         debugLog("Local Keep Safe persistence starting for \(pathKey)")
         keepSafePathsInProgress.insert(pathKey)
-        selectedDuplicatePaths.remove(path)
-        selectedInstallerPaths.remove(path)
+        duplicateSelection.remove(path)
+        installerSelection.remove(path)
         pruneSelectionsAgainstPresentationModel()
 
         Task { @MainActor in
@@ -5124,8 +5516,7 @@ struct ContentView: View {
                     category: category
                 )
                 debugLog("Local Keep Safe persistence finished for \(pathKey)")
-                selectedDuplicatePaths = selectedDuplicatePaths.filter(isStageableDuplicatePath)
-                selectedInstallerPaths = selectedInstallerPaths.filter(isStageableInstallerPath)
+                pruneSelectionsAgainstPresentationModel()
                 showToast("Added to Keep Safe")
             } catch {
                 appAlert = AppAlert(
@@ -5144,10 +5535,10 @@ struct ContentView: View {
         debugLog("Local Keep Safe removal starting for \(item.id)")
         keepSafeItemIDsInProgress.insert(item.id)
         keepSafePathsInProgress.formUnion(pathKeys)
-        selectedDuplicatePaths.remove(item.originalPath)
-        selectedDuplicatePaths.remove(item.resolvedPath)
-        selectedInstallerPaths.remove(item.originalPath)
-        selectedInstallerPaths.remove(item.resolvedPath)
+        duplicateSelection.remove(item.originalPath)
+        duplicateSelection.remove(item.resolvedPath)
+        installerSelection.remove(item.originalPath)
+        installerSelection.remove(item.resolvedPath)
         pruneSelectionsAgainstPresentationModel()
 
         Task { @MainActor in
@@ -5183,13 +5574,27 @@ struct ContentView: View {
         path: String,
         protectedItem: KeepSafeItem?
     ) -> Bool {
-        if isKeepSafePathInProgress(path) { return true }
+        isKeepSafeOperationInProgress(
+            pathKey: keepSafeOperationPathKey(path),
+            protectedItem: protectedItem
+        )
+    }
+
+    private func isKeepSafeOperationInProgress(
+        pathKey: String,
+        protectedItem: KeepSafeItem?
+    ) -> Bool {
+        if isKeepSafePathKeyInProgress(pathKey) { return true }
         guard let protectedItem else { return false }
         return keepSafeItemIDsInProgress.contains(protectedItem.id)
     }
 
     private func isKeepSafePathInProgress(_ path: String) -> Bool {
-        keepSafePathsInProgress.contains(keepSafeOperationPathKey(path))
+        isKeepSafePathKeyInProgress(keepSafeOperationPathKey(path))
+    }
+
+    private func isKeepSafePathKeyInProgress(_ pathKey: String) -> Bool {
+        keepSafePathsInProgress.contains(pathKey)
     }
 
     private func revealKeepSafeItem(_ item: KeepSafeItem) {
@@ -5305,39 +5710,42 @@ struct ContentView: View {
 
     private func resetDuplicateSelection() {
         guard let model = resultsPresentationModel else {
-            selectedDuplicatePaths = []
+            duplicateSelection.removeAll()
             return
         }
-        selectedDuplicatePaths = model.recommendedDuplicateSelection
+        duplicateSelection.setSelection(
+            model.recommendedDuplicateSelection,
+            blockedPathKeys: keepSafePathsInProgress
+        )
     }
 
     private func selectAllDuplicates(_ r: ScanResult) {
         let candidates = resultsPresentationModel?.duplicateStageablePaths ?? Set(r.duplicateGroups.flatMap { group in
             group.paths.filter(isStageableDuplicatePath)
         })
-        selectedDuplicatePaths = candidates.filter { !isKeepSafePathInProgress($0) }
-        showToast("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected")
+        duplicateSelection.setSelection(candidates, blockedPathKeys: keepSafePathsInProgress)
+        showToast("\(duplicateSelection.selectedCount) file\(duplicateSelection.selectedCount == 1 ? "" : "s") selected")
     }
 
     private func deselectAllDuplicates() {
-        selectedDuplicatePaths.removeAll()
+        duplicateSelection.removeAll()
         showToast("Selection cleared")
     }
 
     private func selectAllInstallers(_ items: [InstallerPresentationRow]) {
-        selectedInstallerPaths = Set(items.filter { $0.isStageable && !isKeepSafePathInProgress($0.path) }.map(\.path))
-        showToast("\(selectedInstallerPaths.count) installer\(selectedInstallerPaths.count == 1 ? "" : "s") selected")
+        installerSelection.setSelection(Set(items.filter(\.isStageable).map(\.path)), blockedPathKeys: keepSafePathsInProgress)
+        showToast("\(installerSelection.selectedCount) installer\(installerSelection.selectedCount == 1 ? "" : "s") selected")
     }
 
     private func deselectAllInstallers() {
-        selectedInstallerPaths.removeAll()
+        installerSelection.removeAll()
         showToast("Selection cleared")
     }
 
     private func selectedDuplicateBytes(in result: ScanResult) -> Int64 {
         result.duplicateGroups.reduce(Int64(0)) { total, group in
             total + Int64(group.paths.filter {
-                selectedDuplicatePaths.contains($0) && isStageableDuplicatePath($0)
+                duplicateSelection.contains($0) && isStageableDuplicatePath($0)
             }.count) * group.fileSize
         }
     }
@@ -5425,7 +5833,7 @@ struct ContentView: View {
         isMovingToStaging = true
         defer { isMovingToStaging = false }
 
-        let paths = selectedDuplicatePaths.sorted()
+        let paths = duplicateSelection.selectedPaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
         var protectedSkippedCount = 0
@@ -5449,7 +5857,7 @@ struct ContentView: View {
 
         if !movedOriginalPaths.isEmpty {
             applyMovedDuplicatePaths(movedOriginalPaths)
-            selectedDuplicatePaths.subtract(movedOriginalPaths)
+            duplicateSelection.subtract(movedOriginalPaths)
             refreshStaging()
             showToast("\(movedOriginalPaths.count) file\(movedOriginalPaths.count == 1 ? "" : "s") moved to Staging")
         }
@@ -5477,7 +5885,7 @@ struct ContentView: View {
         isMovingInstallersToStaging = true
         defer { isMovingInstallersToStaging = false }
 
-        let paths = selectedInstallerPaths.sorted()
+        let paths = installerSelection.selectedPaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
         var protectedSkippedCount = 0
@@ -5499,7 +5907,7 @@ struct ContentView: View {
 
         if !movedOriginalPaths.isEmpty {
             applyMovedInstallerPaths(movedOriginalPaths)
-            selectedInstallerPaths.subtract(movedOriginalPaths)
+            installerSelection.subtract(movedOriginalPaths)
             refreshStaging()
             showToast("\(movedOriginalPaths.count) installer\(movedOriginalPaths.count == 1 ? "" : "s") moved to Staging")
         }

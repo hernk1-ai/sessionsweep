@@ -213,7 +213,7 @@ final class KeepSafeStore: ObservableObject {
         return item.originalPath
     }
 
-    static func standardizedPath(_ path: String) -> String {
+    nonisolated static func standardizedPath(_ path: String) -> String {
         URL(fileURLWithPath: path).standardizedFileURL.path
     }
 
