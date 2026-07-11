@@ -1,16 +1,16 @@
 import Foundation
 import CryptoKit
 
-final class CancelToken: @unchecked Sendable {
+nonisolated final class CancelToken: @unchecked Sendable {
     private let lock = NSLock()
     private var _cancelled = false
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
     func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
 }
 
-enum ScanPhase: Sendable { case scanning, findingDuplicates }
+nonisolated enum ScanPhase: Sendable { case scanning, findingDuplicates }
 
-enum Category: String, CaseIterable, Sendable, Hashable {
+nonisolated enum Category: String, CaseIterable, Sendable, Hashable {
     case projects        = "Projects"
     case plugins         = "Plugins"
     case pluginData      = "Plugin Data"
@@ -76,7 +76,7 @@ enum Category: String, CaseIterable, Sendable, Hashable {
     }
 }
 
-struct SizedItem: Identifiable, Sendable {
+nonisolated struct SizedItem: Identifiable, Sendable {
     let id = UUID()
     let url: URL
     let size: Int64
@@ -88,7 +88,7 @@ struct SizedItem: Identifiable, Sendable {
     var parentPath: String { url.deletingLastPathComponent().path }
 }
 
-struct DuplicateGroup: Identifiable, Sendable {
+nonisolated struct DuplicateGroup: Identifiable, Sendable {
     let id = UUID()
     let fileSize: Int64
     let paths: [String]
@@ -102,7 +102,7 @@ struct DuplicateGroup: Identifiable, Sendable {
 }
 
 // Progress now reports itemsSeen (folders + files) so the UI moves immediately.
-struct ScanProgress: Sendable {
+nonisolated struct ScanProgress: Sendable {
     var phase: ScanPhase
     var count: Int
     var total: Int64
@@ -110,7 +110,7 @@ struct ScanProgress: Sendable {
     var itemsSeen: Int = 0
 }
 
-struct ScanResult: Sendable {
+nonisolated struct ScanResult: Sendable {
     var totalSize: Int64 = 0
     var fileCount: Int = 0
     var unreadableCount: Int = 0
@@ -130,7 +130,7 @@ struct ScanResult: Sendable {
     var installerFiles: [SizedItem] = []
 }
 
-enum Scanner {
+nonisolated enum Scanner {
     static let minDupSize: Int64 = 1_048_576
     static let browserMinSize: Int64 = 1_048_576
     private nonisolated static let topFilesLimit = 100

@@ -3,7 +3,7 @@ import Foundation
 // Matches installer files (.dmg, .pkg) against apps already present in
 // /Applications, so SessionSweep can flag installers that are almost
 // certainly safe to remove — the app they installed is already there.
-enum InstalledAppMatcher {
+nonisolated enum InstalledAppMatcher {
     static func isLikelyAlreadyInstalled(installerURL: URL) -> Bool {
         let name = installerURL.deletingPathExtension().lastPathComponent
         // Strip common version/arch suffixes: "-1.40.0-arm64", "-universal", "-2", etc.
@@ -25,4 +25,3 @@ enum InstalledAppMatcher {
         return candidates.contains { installedNames.contains($0.lowercased()) }
     }
 }
-

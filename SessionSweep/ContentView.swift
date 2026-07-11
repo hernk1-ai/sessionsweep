@@ -196,14 +196,14 @@ private enum StorageExplorerPersonalFolder: String, CaseIterable, Hashable {
     }
 }
 
-private enum StorageExplorerSource: Hashable {
+private nonisolated enum StorageExplorerSource: Hashable {
     case audio(StorageExplorerAudioCategory, basePath: String)
     case applications(basePath: String)
     case personal(StorageExplorerPersonalFolder, basePath: String)
     case otherMac(basePath: String)
 }
 
-private enum StorageExplorerRoute: Hashable {
+private nonisolated enum StorageExplorerRoute: Hashable {
     case root
     case audioProduction
     case audioCategory(StorageExplorerAudioCategory)
@@ -212,7 +212,7 @@ private enum StorageExplorerRoute: Hashable {
     case rawFolder(path: String, source: StorageExplorerSource)
 }
 
-private struct StorageExplorerNode: Identifiable {
+private nonisolated struct StorageExplorerNode: Identifiable {
     let id: String
     let title: String
     let subtitle: String
@@ -223,14 +223,14 @@ private struct StorageExplorerNode: Identifiable {
     let route: StorageExplorerRoute?
 }
 
-private struct ApplicationExplorerItem: Identifiable {
+private nonisolated struct ApplicationExplorerItem: Identifiable {
     let node: StorageExplorerNode
     let classification: ApplicationClassification
 
     var id: String { node.id }
 }
 
-private struct StorageExplorerContributor: Identifiable {
+private nonisolated struct StorageExplorerContributor: Identifiable {
     let id: String
     let title: String
     let subtitle: String
@@ -240,30 +240,30 @@ private struct StorageExplorerContributor: Identifiable {
     let priority: Int
 }
 
-private struct StorageExplorerBreadcrumb: Identifiable {
+private nonisolated struct StorageExplorerBreadcrumb: Identifiable {
     let id: String
     let title: String
     let route: StorageExplorerRoute
 }
 
-private struct CategoryPresentationRow {
+private nonisolated struct CategoryPresentationRow {
     let category: Category
     let size: Int64
 }
 
-private struct AudioCategoryPresentationRow {
+private nonisolated struct AudioCategoryPresentationRow {
     let category: AudioSystemDataCategory
     let size: Int64
 }
 
-private struct AudioFolderPresentationRow: Identifiable {
+private nonisolated struct AudioFolderPresentationRow: Identifiable {
     let item: AudioSystemDataItem
     let guidance: AudioFolderGuidance
 
     var id: String { item.path }
 }
 
-private struct DuplicatePathPresentationRow: Identifiable {
+private nonisolated struct DuplicatePathPresentationRow: Identifiable {
     let path: String
     let fileSize: Int64
     let isKeeper: Bool
@@ -276,7 +276,7 @@ private struct DuplicatePathPresentationRow: Identifiable {
     var isStageable: Bool { !isNeverRecommend && !isKeepSafe }
 }
 
-private struct DuplicateGroupPresentationRow: Identifiable {
+private nonisolated struct DuplicateGroupPresentationRow: Identifiable {
     let group: DuplicateGroup
     let keeper: String?
     let actionableBytes: Int64
@@ -285,7 +285,7 @@ private struct DuplicateGroupPresentationRow: Identifiable {
     var id: DuplicateGroup.ID { group.id }
 }
 
-private struct IdenticalContentGroupPresentation: Identifiable {
+private nonisolated struct IdenticalContentGroupPresentation: Identifiable {
     let group: DuplicateGroup
     let classification: DifferentNameMatchClassification
     let sharedParent: String?
@@ -296,7 +296,7 @@ private struct IdenticalContentGroupPresentation: Identifiable {
     var filename: String { group.displayName }
 }
 
-private struct InstallerPresentationRow: Identifiable {
+private nonisolated struct InstallerPresentationRow: Identifiable {
     let item: SizedItem
     let path: String
     let displayName: String
@@ -308,14 +308,7 @@ private struct InstallerPresentationRow: Identifiable {
     var isStageable: Bool { !isKeepSafe }
 }
 
-private struct RawStorageChild {
-    let path: String
-    let title: String
-    let size: Int64
-    let hasChildren: Bool
-}
-
-private struct StorageExplorerRoutePresentation {
+private nonisolated struct StorageExplorerRoutePresentation {
     let route: StorageExplorerRoute
     let nodes: [StorageExplorerNode]
     let total: Int64
@@ -323,7 +316,7 @@ private struct StorageExplorerRoutePresentation {
     let breadcrumbs: [StorageExplorerBreadcrumb]
 }
 
-private struct ResultsPresentationModel {
+private nonisolated struct ResultsPresentationModel {
     let identity: String
     let totalSize: Int64
     let keepSafeIndex: KeepSafeIndex
@@ -349,9 +342,8 @@ private struct ResultsPresentationModel {
     let sortedKeepSafeItems: [KeepSafeItem]
     private let result: ScanResult
     private let audioContributors: [StorageExplorerContributor]
-    private let rawChildrenByPath: [String: [RawStorageChild]]
 
-    static func build(
+    nonisolated static func build(
         result: ScanResult,
         keepSafeItems: [KeepSafeItem],
         identity: String
@@ -454,7 +446,6 @@ private struct ResultsPresentationModel {
         timer.mark("Largest assets")
 
         let audioContributors = audioProductionContributors(in: result)
-        let rawChildrenByPath = Self.rawChildrenByPath(in: result)
         timer.mark("Storage Explorer base cache")
 
         let sortedKeepSafeItems = keepSafeItems.sorted { lhs, rhs in
@@ -498,13 +489,12 @@ private struct ResultsPresentationModel {
             otherLargeApplications: otherLargeApplications,
             sortedKeepSafeItems: sortedKeepSafeItems,
             result: result,
-            audioContributors: audioContributors,
-            rawChildrenByPath: rawChildrenByPath
+            audioContributors: audioContributors
         )
     }
 }
 
-private extension ResultsPresentationModel {
+private nonisolated extension ResultsPresentationModel {
     func routePresentation(for route: StorageExplorerRoute) -> StorageExplorerRoutePresentation {
         let normalizedRoute = normalizedStorageExplorerRoute(route)
         let nodes = storageExplorerNodes(for: normalizedRoute)
@@ -609,21 +599,6 @@ private extension ResultsPresentationModel {
         case .unclear: return 3
         case .likelyConsolidatedStems: return 4
         case .possibleSilentFiles: return 5
-        }
-    }
-
-    private static func rawChildrenByPath(in result: ScanResult) -> [String: [RawStorageChild]] {
-        result.folderChildren.mapValues { paths in
-            paths
-                .map { path in
-                    RawStorageChild(
-                        path: path,
-                        title: displayName(forPath: path),
-                        size: result.folderSizes[path] ?? 0,
-                        hasChildren: !(result.folderChildren[path]?.isEmpty ?? true)
-                    )
-                }
-                .sorted { $0.size > $1.size }
         }
     }
 
@@ -867,22 +842,28 @@ private extension ResultsPresentationModel {
 
     private func rawFolderExplorerNodes(path: String, source: StorageExplorerSource) -> [StorageExplorerNode] {
         let parentTotal = max(size(ofPath: path), 1)
-        return (rawChildrenByPath[path] ?? []).map { child in
-            let proportion = Double(child.size) / Double(parentTotal)
-            let subtitle = proportion >= 0.01
-                ? "\(Int((proportion * 100).rounded()))% of this level"
-                : "Less than 1% of this level"
-            return StorageExplorerNode(
-                id: "raw-\(child.path)",
-                title: child.title,
-                subtitle: subtitle,
-                path: child.path,
-                size: child.size,
-                iconName: "folder.fill",
-                color: .teal,
-                route: child.hasChildren ? .rawFolder(path: child.path, source: source) : nil
-            )
-        }
+        return (result.folderChildren[normalizedPath(path)] ?? [])
+            .map { childPath in
+                let childSize = size(ofPath: childPath)
+                let proportion = Double(childSize) / Double(parentTotal)
+                let subtitle = proportion >= 0.01
+                    ? "\(Int((proportion * 100).rounded()))% of this level"
+                    : "Less than 1% of this level"
+                return StorageExplorerNode(
+                    id: "raw-\(childPath)",
+                    title: Self.displayName(forPath: childPath),
+                    subtitle: subtitle,
+                    path: childPath,
+                    size: childSize,
+                    iconName: "folder.fill",
+                    color: .teal,
+                    route: hasChildren(childPath) ? .rawFolder(path: childPath, source: source) : nil
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.size != rhs.size { return lhs.size > rhs.size }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
     }
 
     private func personalNode(folder: StorageExplorerPersonalFolder, path: String, size: Int64) -> StorageExplorerNode {
@@ -1019,11 +1000,12 @@ private extension ResultsPresentationModel {
         var candidates: [StorageExplorerContributor] = []
 
         for item in result.audioSystemData.items {
+            let path = normalizedPath(item.path)
             candidates.append(StorageExplorerContributor(
-                id: "audio-system-\(item.path)",
+                id: "audio-system-\(path)",
                 title: item.friendlyName,
                 subtitle: item.category.rawValue,
-                path: item.path,
+                path: path,
                 size: item.size,
                 category: audioCategory(for: item.category),
                 priority: 100
@@ -1032,8 +1014,8 @@ private extension ResultsPresentationModel {
 
         for (path, size) in result.folderSizes where size >= 1_048_576 {
             let normalized = normalizedPath(path)
-            guard AudioSystemDataClassifier.classify(path: normalized) == nil,
-                  let category = audioCategory(forFolderPath: normalized) else { continue }
+            guard let category = audioCategory(forFolderPath: normalized),
+                  AudioSystemDataClassifier.classify(path: normalized) == nil else { continue }
             candidates.append(StorageExplorerContributor(
                 id: "audio-folder-\(normalized)",
                 title: displayName(forPath: normalized),
@@ -1073,7 +1055,7 @@ private extension ResultsPresentationModel {
 
         var selected: [StorageExplorerContributor] = []
         for candidate in sorted {
-            if selected.contains(where: { pathsOverlap($0.path, candidate.path) }) { continue }
+            if selected.contains(where: { pathsOverlapNormalized($0.path, candidate.path) }) { continue }
             selected.append(candidate)
         }
         return selected
@@ -1215,7 +1197,7 @@ private extension ResultsPresentationModel {
     }
 
     private func hasChildren(_ path: String) -> Bool {
-        !(rawChildrenByPath[path]?.isEmpty ?? true)
+        !(result.folderChildren[normalizedPath(path)]?.isEmpty ?? true)
     }
 
     private static func sourceBasePath(_ source: StorageExplorerSource) -> String {
@@ -1286,9 +1268,18 @@ private extension ResultsPresentationModel {
         pathContains(lhs, candidate: rhs) || pathContains(rhs, candidate: lhs)
     }
 
+    private static func pathsOverlapNormalized(_ lhs: String, _ rhs: String) -> Bool {
+        pathContainsNormalized(lhs, candidate: rhs) || pathContainsNormalized(rhs, candidate: lhs)
+    }
+
     private static func pathContains(_ path: String, candidate: String) -> Bool {
         let parent = normalizedPath(path)
         let child = normalizedPath(candidate)
+        if parent == "/" { return child.hasPrefix("/") }
+        return parent == child || child.hasPrefix(parent + "/")
+    }
+
+    private static func pathContainsNormalized(_ parent: String, candidate child: String) -> Bool {
         if parent == "/" { return child.hasPrefix("/") }
         return parent == child || child.hasPrefix(parent + "/")
     }
@@ -1319,7 +1310,7 @@ private struct ActionToast: Identifiable, Equatable {
     let message: String
 }
 
-private struct ResultsPerformanceTimer {
+private nonisolated struct ResultsPerformanceTimer {
     private var checkpoints: [(String, Double)] = []
     private let start = CFAbsoluteTimeGetCurrent()
     private var last = CFAbsoluteTimeGetCurrent()
@@ -1347,7 +1338,7 @@ private struct ResultsPerformanceTimer {
     }
 }
 
-private struct KeepSafeIndex {
+private nonisolated struct KeepSafeIndex {
     let exactItemsByPath: [String: KeepSafeItem]
     let folderPrefixes: [(prefix: String, item: KeepSafeItem)]
 
@@ -1524,6 +1515,10 @@ struct ContentView: View {
     @State private var expandedResultListIDs: Set<String> = []
     @State private var storageExplorerRoute: StorageExplorerRoute = .root
     @State private var resultsPresentationModel: ResultsPresentationModel?
+    @State private var resultsPresentationBuildTask: Task<Void, Never>?
+    @State private var pendingResultsPresentationIdentity: String?
+    @State private var pendingResultsPresentationShouldSelectDuplicates = false
+    @State private var suppressNextKeepSafePresentationRebuild = false
     @State private var pendingRemoveKeepSafeItem: KeepSafeItem?
     @State private var actionToast: ActionToast?
     @State private var isMovingToStaging = false
@@ -1574,12 +1569,19 @@ struct ContentView: View {
         .onChange(of: scanResultExpansionIdentity(controller.result)) { _ in
             expandedResultListIDs.removeAll()
             storageExplorerRoute = .root
+            let keepSafeIdentityBeforeRefresh = keepSafePresentationIdentity()
             refreshKeepSafeFromCurrentScan()
+            suppressNextKeepSafePresentationRebuild = keepSafePresentationIdentity() != keepSafeIdentityBeforeRefresh
             refreshStaging()
             rebuildResultsPresentationModel(selectRecommendedDuplicates: true)
             selectedInstallerPaths.removeAll()
         }
         .onChange(of: keepSafePresentationIdentity()) { _ in
+            if suppressNextKeepSafePresentationRebuild {
+                suppressNextKeepSafePresentationRebuild = false
+                pruneSelectionsAgainstPresentationModel()
+                return
+            }
             rebuildResultsPresentationModel(selectRecommendedDuplicates: false)
             pruneSelectionsAgainstPresentationModel()
         }
@@ -1831,6 +1833,10 @@ struct ContentView: View {
 
     private func rebuildResultsPresentationModel(selectRecommendedDuplicates: Bool) {
         guard let result = controller.result else {
+            resultsPresentationBuildTask?.cancel()
+            resultsPresentationBuildTask = nil
+            pendingResultsPresentationIdentity = nil
+            pendingResultsPresentationShouldSelectDuplicates = false
             resultsPresentationModel = nil
             selectedDuplicatePaths.removeAll()
             selectedInstallerPaths.removeAll()
@@ -1838,16 +1844,52 @@ struct ContentView: View {
         }
 
         let identity = resultsPresentationIdentity(for: result)
-        let model = ResultsPresentationModel.build(
-            result: result,
-            keepSafeItems: keepSafeStore.items,
-            identity: identity
-        )
-        resultsPresentationModel = model
-        if selectRecommendedDuplicates {
-            selectedDuplicatePaths = model.recommendedDuplicateSelection
+        if let model = resultsPresentationModel, model.identity == identity {
+            if selectRecommendedDuplicates {
+                selectedDuplicatePaths = model.recommendedDuplicateSelection
+            }
+            pruneSelectionsAgainstPresentationModel()
+            return
         }
-        pruneSelectionsAgainstPresentationModel()
+
+        if pendingResultsPresentationIdentity == identity {
+            pendingResultsPresentationShouldSelectDuplicates = pendingResultsPresentationShouldSelectDuplicates || selectRecommendedDuplicates
+            return
+        }
+
+        resultsPresentationBuildTask?.cancel()
+        pendingResultsPresentationIdentity = identity
+        pendingResultsPresentationShouldSelectDuplicates = selectRecommendedDuplicates
+
+        let keepSafeItems = keepSafeStore.items
+        resultsPresentationBuildTask = Task.detached(priority: .userInitiated) {
+            let model = ResultsPresentationModel.build(
+                result: result,
+                keepSafeItems: keepSafeItems,
+                identity: identity
+            )
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard pendingResultsPresentationIdentity == identity else { return }
+                guard let currentResult = controller.result,
+                      resultsPresentationIdentity(for: currentResult) == identity else {
+                    pendingResultsPresentationIdentity = nil
+                    pendingResultsPresentationShouldSelectDuplicates = false
+                    return
+                }
+
+                let shouldSelectDuplicates = pendingResultsPresentationShouldSelectDuplicates
+                resultsPresentationModel = model
+                pendingResultsPresentationIdentity = nil
+                pendingResultsPresentationShouldSelectDuplicates = false
+                resultsPresentationBuildTask = nil
+                if shouldSelectDuplicates {
+                    selectedDuplicatePaths = model.recommendedDuplicateSelection
+                }
+                pruneSelectionsAgainstPresentationModel()
+            }
+        }
     }
 
     private func pruneSelectionsAgainstPresentationModel() {

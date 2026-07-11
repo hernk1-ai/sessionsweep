@@ -1,6 +1,6 @@
 import Foundation
 
-enum AudioSystemDataCategory: String, CaseIterable, Sendable, Hashable {
+nonisolated enum AudioSystemDataCategory: String, CaseIterable, Sendable, Hashable {
     case plugins = "Plugins"
     case presets = "Presets"
     case impulseResponses = "Impulse Responses"
@@ -8,14 +8,14 @@ enum AudioSystemDataCategory: String, CaseIterable, Sendable, Hashable {
     case cachesDownloads = "Caches / Downloads"
 }
 
-enum AudioSystemDataSafetyStatus: String, Sendable, Hashable {
+nonisolated enum AudioSystemDataSafetyStatus: String, Sendable, Hashable {
     case essential = "Essential"
     case review = "Review"
     case likelyCache = "Likely cache"
     case unknown = "Unknown"
 }
 
-struct AudioSystemDataItem: Identifiable, Sendable {
+nonisolated struct AudioSystemDataItem: Identifiable, Sendable {
     let id = UUID()
     let friendlyName: String
     let path: String
@@ -24,7 +24,7 @@ struct AudioSystemDataItem: Identifiable, Sendable {
     let safetyStatus: AudioSystemDataSafetyStatus
 }
 
-struct AudioSystemDataSummary: Sendable {
+nonisolated struct AudioSystemDataSummary: Sendable {
     var items: [AudioSystemDataItem] = []
     var categoryTotals: [AudioSystemDataCategory: Int64] = [:]
 
@@ -41,7 +41,7 @@ struct AudioSystemDataSummary: Sendable {
     }
 }
 
-enum AudioSystemDataClassifier {
+nonisolated enum AudioSystemDataClassifier {
     private static let pluginFolderNames: [String: String] = [
         "vst": "VST Plug-Ins",
         "vst3": "VST3 Plug-Ins",
