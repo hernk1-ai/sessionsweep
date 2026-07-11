@@ -17,7 +17,7 @@ enum ApplicationClassificationKind: String, CaseIterable, Sendable {
     case aiApplication
     case otherApplication
 
-    var displayTitle: String {
+    nonisolated var displayTitle: String {
         switch self {
         case .audioWorkstation:
             return "Audio Workstation"
@@ -52,7 +52,7 @@ enum ApplicationClassificationKind: String, CaseIterable, Sendable {
         }
     }
 
-    var isAudioApplication: Bool {
+    nonisolated var isAudioApplication: Bool {
         switch self {
         case .audioWorkstation, .audioEditor, .audioRestoration, .djApplication,
              .audioUtility, .pluginManager, .audioProductionApplication:
@@ -63,7 +63,7 @@ enum ApplicationClassificationKind: String, CaseIterable, Sendable {
         }
     }
 
-    var description: String {
+    nonisolated var description: String {
         switch self {
         case .audioWorkstation:
             return "Used for music production, recording, editing, mixing, or mastering."
@@ -102,9 +102,9 @@ enum ApplicationClassificationKind: String, CaseIterable, Sendable {
 struct ApplicationClassification: Sendable {
     let kind: ApplicationClassificationKind
 
-    var displayTitle: String { kind.displayTitle }
-    var isAudioApplication: Bool { kind.isAudioApplication }
-    var description: String { kind.description }
+    nonisolated var displayTitle: String { kind.displayTitle }
+    nonisolated var isAudioApplication: Bool { kind.isAudioApplication }
+    nonisolated var description: String { kind.description }
 }
 
 #if DEBUG
@@ -117,12 +117,12 @@ struct ApplicationClassificationDebugInfo: Sendable {
 #endif
 
 enum ApplicationClassifier {
-    static func classify(displayName: String, path: String) -> ApplicationClassification {
+    static nonisolated func classify(displayName: String, path: String) -> ApplicationClassification {
         ApplicationClassification(kind: classificationDetails(displayName: displayName, path: path).kind)
     }
 
 #if DEBUG
-    static func debugInfo(displayName: String, path: String) -> ApplicationClassificationDebugInfo {
+    static nonisolated func debugInfo(displayName: String, path: String) -> ApplicationClassificationDebugInfo {
         let details = classificationDetails(displayName: displayName, path: path)
         return ApplicationClassificationDebugInfo(
             normalizedName: details.normalizedName,
@@ -152,7 +152,7 @@ enum ApplicationClassifier {
         case contains
     }
 
-    private static func classificationDetails(displayName: String, path: String) -> ClassificationDetails {
+    private static nonisolated func classificationDetails(displayName: String, path: String) -> ClassificationDetails {
         let bundleIdentifier = normalizedBundleIdentifier(for: path)
         let normalizedName = normalized(displayName)
 
@@ -191,11 +191,11 @@ enum ApplicationClassifier {
         )
     }
 
-    private static func normalizedBundleIdentifier(for path: String) -> String {
+    private static nonisolated func normalizedBundleIdentifier(for path: String) -> String {
         Bundle(url: URL(fileURLWithPath: path))?.bundleIdentifier?.lowercased() ?? ""
     }
 
-    private static func normalized(_ value: String) -> String {
+    private static nonisolated func normalized(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let withoutAppSuffix = trimmed.lowercased().hasSuffix(".app")
             ? String(trimmed.dropLast(4))
@@ -207,7 +207,7 @@ enum ApplicationClassifier {
             .joined(separator: " ")
     }
 
-    private static func matches(_ normalizedName: String, rule: NameRule) -> Bool {
+    private static nonisolated func matches(_ normalizedName: String, rule: NameRule) -> Bool {
         switch rule.match {
         case .exact:
             return normalizedName == rule.marker
@@ -218,21 +218,21 @@ enum ApplicationClassifier {
         }
     }
 
-    private static func pluginManagerHeuristicMatch(_ normalizedName: String) -> String? {
+    private static nonisolated func pluginManagerHeuristicMatch(_ normalizedName: String) -> String? {
         guard let vendor = audioVendorSignals.first(where: { containsSignal($0, in: normalizedName) }),
               let role = pluginManagerRoleTerms.first(where: { containsSignal($0, in: normalizedName) })
         else { return nil }
         return "heuristic:plugin-manager:\(vendor)+\(role)"
     }
 
-    private static func containsSignal(_ signal: String, in normalizedName: String) -> Bool {
+    private static nonisolated func containsSignal(_ signal: String, in normalizedName: String) -> Bool {
         if signal.count <= 3 {
             return normalizedName.split(separator: " ").contains(Substring(signal))
         }
         return normalizedName.contains(signal)
     }
 
-    private static let bundleIdentifierRules: [NameRule] = [
+    private nonisolated static let bundleIdentifierRules: [NameRule] = [
         NameRule(marker: "com.apple.logic", kind: .audioWorkstation, match: .contains),
         NameRule(marker: "com.apple.garageband", kind: .audioWorkstation, match: .contains),
         NameRule(marker: "com.ableton.live", kind: .audioWorkstation, match: .contains),
@@ -248,7 +248,7 @@ enum ApplicationClassifier {
         NameRule(marker: "com.apple.dt.xcode", kind: .developerTool, match: .contains)
     ]
 
-    private static let nameRules: [NameRule] = [
+    private nonisolated static let nameRules: [NameRule] = [
         NameRule(marker: "izotope rx", kind: .audioRestoration, match: .prefix),
         NameRule(marker: "rx 10", kind: .audioRestoration, match: .prefix),
         NameRule(marker: "rx 11", kind: .audioRestoration, match: .prefix),
@@ -365,7 +365,7 @@ enum ApplicationClassifier {
         NameRule(marker: "photoshop", kind: .creativeApplication, match: .prefix)
     ]
 
-    private static let audioVendorSignals = [
+    private nonisolated static let audioVendorSignals = [
         "ableton",
         "algoriddim",
         "apple logic",
@@ -395,7 +395,7 @@ enum ApplicationClassifier {
         "xln audio"
     ]
 
-    private static let pluginManagerRoleTerms = [
+    private nonisolated static let pluginManagerRoleTerms = [
         "access",
         "central",
         "cloud",

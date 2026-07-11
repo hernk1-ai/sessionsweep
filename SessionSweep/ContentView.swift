@@ -246,6 +246,122 @@ private struct StorageExplorerBreadcrumb: Identifiable {
     let route: StorageExplorerRoute
 }
 
+private struct ActionToast: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+}
+
+private enum ResultSectionID: Hashable {
+    case summary
+    case recommendations
+    case categories
+    case audioSystemData
+    case keepSafe
+    case duplicates
+    case installers
+    case staging
+    case storageExplorer
+    case largestAudioAssets
+}
+
+private struct PointerCursorModifier: ViewModifier {
+    let isActive: Bool
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content.onHover { hovering in
+            guard isActive else { return }
+            if hovering {
+                NSCursor.pointingHand.push()
+                isHovering = true
+            } else if isHovering {
+                NSCursor.pop()
+                isHovering = false
+            }
+        }
+    }
+}
+
+private struct InteractiveHoverModifier: ViewModifier {
+    let isActive: Bool
+    let isSelected: Bool
+    let cornerRadius: CGFloat
+    let tint: Color
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(backgroundColor)
+            )
+            .onHover { hovering in
+                guard isActive else { return }
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isHovering = hovering
+                }
+            }
+            .pointerCursor(isActive)
+    }
+
+    private var backgroundColor: Color {
+        if isSelected { return tint.opacity(0.14) }
+        if isActive && isHovering { return tint.opacity(0.09) }
+        return .clear
+    }
+}
+
+private extension View {
+    func pointerCursor(_ isActive: Bool = true) -> some View {
+        modifier(PointerCursorModifier(isActive: isActive))
+    }
+
+    func interactiveHover(
+        isActive: Bool = true,
+        isSelected: Bool = false,
+        cornerRadius: CGFloat = 7,
+        tint: Color = .teal
+    ) -> some View {
+        modifier(InteractiveHoverModifier(
+            isActive: isActive,
+            isSelected: isSelected,
+            cornerRadius: cornerRadius,
+            tint: tint
+        ))
+    }
+
+    func interactiveRow(
+        isActive: Bool = true,
+        isSelected: Bool = false,
+        tint: Color = .teal
+    ) -> some View {
+        padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .interactiveHover(isActive: isActive, isSelected: isSelected, tint: tint)
+    }
+
+    func iconActionControl(
+        isActive: Bool = true,
+        isSelected: Bool = false,
+        help text: String
+    ) -> some View {
+        frame(width: 28, height: 28)
+            .contentShape(Rectangle())
+            .interactiveHover(isActive: isActive, isSelected: isSelected, cornerRadius: 14, tint: .teal)
+            .help(text)
+            .accessibilityLabel(Text(text))
+    }
+
+    func subtleTextAction(help text: String? = nil) -> some View {
+        padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .interactiveHover(cornerRadius: 6, tint: .teal)
+            .help(text ?? "")
+    }
+}
+
 private extension Array where Element: Hashable {
     func removingDuplicates() -> [Element] {
         var seen = Set<Element>()
@@ -265,6 +381,11 @@ struct ContentView: View {
     @State private var expandedResultListIDs: Set<String> = []
     @State private var storageExplorerRoute: StorageExplorerRoute = .root
     @State private var pendingRemoveKeepSafeItem: KeepSafeItem?
+    @State private var actionToast: ActionToast?
+    @State private var isMovingToStaging = false
+    @State private var isMovingInstallersToStaging = false
+    @State private var isRestoringAllStaged = false
+    @State private var isClearingStaging = false
     @AppStorage("SessionSweepHasValidLicense") private var hasValidLicense = false
 
     var body: some View {
@@ -279,6 +400,22 @@ struct ContentView: View {
         }
         .padding(28)
         .frame(minWidth: 780, minHeight: 660)
+        .overlay(alignment: .topTrailing) {
+            if let actionToast {
+                Text(actionToast.message)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 10, x: 0, y: 4)
+                    .padding(.top, 4)
+                    .padding(.trailing, 4)
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    .accessibilityLabel(actionToast.message)
+            }
+        }
+        .animation(.easeInOut(duration: 0.16), value: actionToast)
         .task {
             refreshStaging()
         }
@@ -326,12 +463,16 @@ struct ContentView: View {
                     Text("Cancel").frame(minWidth: 60)
                 }
                 .controlSize(.large)
+                .pointerCursor()
+                .help("Cancel scan")
             } else if controller.result != nil {
                 Button { pickAndScan() } label: {
                     Label("Scan Again", systemImage: "magnifyingglass")
                 }
                 .controlSize(.large)
                 .buttonStyle(.borderedProminent)
+                .pointerCursor()
+                .help("Choose a folder and scan again")
             }
         }
     }
@@ -350,6 +491,8 @@ struct ContentView: View {
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)
+            .pointerCursor()
+            .help("Choose a folder to scan")
             .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -414,6 +557,8 @@ struct ContentView: View {
                     .frame(minWidth: 120)
             }
             .controlSize(.regular)
+            .pointerCursor()
+            .help("Cancel scan")
             .padding(.bottom, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -421,57 +566,70 @@ struct ContentView: View {
     }
 
     private func resultsView(_ r: ScanResult) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(human(r.totalSize))
-                        .font(.system(size: 46, weight: .bold, design: .rounded))
-                    Text("across \(r.fileCount.formatted()) items in \(headlineLocation)")
-                        .foregroundStyle(.secondary)
-                    Text(String(format: "Scan completed in %.0f seconds.", r.elapsed))
-                        .font(.callout).foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                    if r.unreadableCount > 0 || r.excludedSystemCount > 0 {
-                        VStack(alignment: .leading, spacing: 3) {
-                            if r.unreadableCount > 0 {
-                                Label(
-                                    "\(r.unreadableCount) item\(r.unreadableCount == 1 ? "" : "s") couldn't be read — these are protected system files that require special permissions. Nothing was missed from your audio content.",
-                                    systemImage: "lock"
-                                )
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(human(r.totalSize))
+                            .font(.system(size: 46, weight: .bold, design: .rounded))
+                        Text("across \(r.fileCount.formatted()) items in \(headlineLocation)")
+                            .foregroundStyle(.secondary)
+                        Text(String(format: "Scan completed in %.0f seconds.", r.elapsed))
+                            .font(.callout).foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                        if r.unreadableCount > 0 || r.excludedSystemCount > 0 {
+                            VStack(alignment: .leading, spacing: 3) {
+                                if r.unreadableCount > 0 {
+                                    Label(
+                                        "\(r.unreadableCount) item\(r.unreadableCount == 1 ? "" : "s") couldn't be read — these are protected system files that require special permissions. Nothing was missed from your audio content.",
+                                        systemImage: "lock"
+                                    )
+                                }
+                                if r.excludedSystemCount > 0 {
+                                    Label(
+                                        "\(r.excludedSystemCount) macOS system folder\(r.excludedSystemCount == 1 ? "" : "s") skipped — SessionSweep only looks at your content, not core OS files.",
+                                        systemImage: "xmark.shield"
+                                    )
+                                }
                             }
-                            if r.excludedSystemCount > 0 {
-                                Label(
-                                    "\(r.excludedSystemCount) macOS system folder\(r.excludedSystemCount == 1 ? "" : "s") skipped — SessionSweep only looks at your content, not core OS files.",
-                                    systemImage: "xmark.shield"
-                                )
-                            }
+                            .font(.caption).foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
-                        .font(.caption).foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        if r.cancelled {
+                            Label("Scan cancelled — partial results", systemImage: "exclamationmark.circle")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                     }
-                    if r.cancelled {
-                        Label("Scan cancelled — partial results", systemImage: "exclamationmark.circle")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
+                    .id(ResultSectionID.summary)
+
+                    storageRecommendationsSection(r, proxy: proxy)
+                        .id(ResultSectionID.recommendations)
+                    card { categorySection(r) }
+                        .id(ResultSectionID.categories)
+                    card { audioSystemDataSection(r) }
+                        .id(ResultSectionID.audioSystemData)
+                    card { keepSafeSection() }
+                        .id(ResultSectionID.keepSafe)
+                    card { duplicatesSection(r) }
+                        .id(ResultSectionID.duplicates)
+                    card { installersSection(r) }
+                        .id(ResultSectionID.installers)
+                    card { stagingSection() }
+                        .id(ResultSectionID.staging)
+                    card { browserSection() }
+                        .id(ResultSectionID.storageExplorer)
+
+                    largestAudioAssetsSection(r)
+                        .id(ResultSectionID.largestAudioAssets)
+
+                    Text("Scanned in \(String(format: "%.1f", r.elapsed))s · "
+                         + "\(r.fileCount.formatted()) items · \(r.unreadableCount) unreadable · "
+                         + "\(r.excludedSystemCount) system folders skipped")
+                        .font(.caption2).foregroundStyle(.tertiary).padding(.top, 4)
                 }
-
-                card { categorySection(r) }
-                card { audioSystemDataSection(r) }
-                card { keepSafeSection() }
-                card { duplicatesSection(r) }
-                card { installersSection(r) }
-                card { stagingSection() }
-                card { browserSection() }
-
-                largestAudioAssetsSection(r)
-
-                Text("Scanned in \(String(format: "%.1f", r.elapsed))s · "
-                     + "\(r.fileCount.formatted()) items · \(r.unreadableCount) unreadable · "
-                     + "\(r.excludedSystemCount) system folders skipped")
-                    .font(.caption2).foregroundStyle(.tertiary).padding(.top, 4)
+                .padding(.bottom, 16)
             }
-            .padding(.bottom, 16)
         }
     }
 
@@ -480,6 +638,133 @@ struct ContentView: View {
             .padding(18)
             .background(Color.secondary.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func storageRecommendationsSection(
+        _ r: ScanResult,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        let recommendations = StorageRecommendationEngine.recommendations(
+            for: r,
+            protectedItems: keepSafeStore.items
+        )
+
+        if !recommendations.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Storage Recommendations")
+                        .font(.headline)
+                    Text("Here’s what SessionSweep recommends based on this scan, ordered from safest to most review-dependent.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 285), spacing: 12, alignment: .top)],
+                    alignment: .leading,
+                    spacing: 12
+                ) {
+                    ForEach(recommendations) { recommendation in
+                        recommendationCard(recommendation, result: r, proxy: proxy)
+                    }
+                }
+            }
+        }
+    }
+
+    private func recommendationCard(
+        _ recommendation: StorageRecommendation,
+        result: ScanResult,
+        proxy: ScrollViewProxy
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: recommendation.iconName)
+                    .font(.title3)
+                    .foregroundStyle(recommendationColor(recommendation.kind))
+                    .frame(width: 24, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(recommendation.title)
+                        .font(.subheadline.weight(.semibold))
+                    Text(recommendation.estimate)
+                        .font(.title3.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text(recommendation.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 8) {
+                if let confidence = recommendation.confidence {
+                    Text(confidence)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(Color.secondary.opacity(0.10), in: Capsule())
+                }
+                Spacer(minLength: 0)
+                if let destination = recommendation.destination {
+                    Button {
+                        navigateToRecommendation(destination, result: result, proxy: proxy)
+                    } label: {
+                        Label(recommendation.actionTitle, systemImage: "arrow.right")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.teal)
+                    .subtleTextAction(help: recommendation.actionTitle)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 190, alignment: .topLeading)
+        .padding(16)
+        .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private func recommendationColor(_ kind: StorageRecommendationKind) -> Color {
+        switch kind {
+        case .safeCleanup: return .teal
+        case .archiveCandidates: return .purple
+        case .libraryRelocation: return .mint
+        case .largeApplications: return .brown
+        case .leaveInPlace: return .secondary
+        case .keepSafe: return .teal
+        }
+    }
+
+    private func navigateToRecommendation(
+        _ destination: StorageRecommendationDestination,
+        result: ScanResult,
+        proxy: ScrollViewProxy
+    ) {
+        let target: ResultSectionID
+        switch destination {
+        case .safeCleanup:
+            target = result.duplicateGroups.isEmpty ? .installers : .duplicates
+        case .archiveCandidates:
+            storageExplorerRoute = .personalFiles
+            target = .storageExplorer
+        case .libraryRelocation, .leaveInPlace:
+            target = .audioSystemData
+        case .applications:
+            storageExplorerRoute = .applications
+            target = .storageExplorer
+        case .keepSafe:
+            target = .keepSafe
+        }
+
+        withAnimation(.easeInOut(duration: 0.18)) {
+            proxy.scrollTo(target, anchor: .top)
+        }
     }
 
     private func categorySection(_ r: ScanResult) -> some View {
@@ -603,6 +888,7 @@ struct ContentView: View {
                     Button("Remove from Keep Safe") { pendingRemoveKeepSafeItem = item }
                 } label: {
                     Image(systemName: "ellipsis.circle")
+                        .iconActionControl(help: "More actions")
                 }
                 .buttonStyle(.borderless)
                 .menuStyle(.button)
@@ -790,11 +1076,15 @@ struct ContentView: View {
                 Label(isExpanded ? expandedTitle : collapsedTitle,
                       systemImage: isExpanded ? "chevron.up" : "chevron.down")
                     .font(.caption.weight(.medium))
-                    .padding(.vertical, 4)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.teal)
+            .interactiveHover(isSelected: isExpanded, cornerRadius: 7, tint: .teal)
+            .pointerCursor()
+            .help(isExpanded ? expandedTitle : collapsedTitle)
             .accessibilityLabel(isExpanded
                                 ? (accessibilityExpandedLabel ?? expandedTitle)
                                 : (accessibilityCollapsedLabel ?? collapsedTitle))
@@ -933,9 +1223,8 @@ struct ContentView: View {
                     toggleAudioGuidance(for: item.path)
                 } label: {
                     Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
-                        .font(.callout)
-                        .padding(4)
-                        .contentShape(Rectangle())
+                        .font(.title3)
+                        .iconActionControl(isSelected: isExpanded, help: "About this folder")
                 }
                 .buttonStyle(.borderless)
                 .help("About this folder")
@@ -994,12 +1283,14 @@ struct ContentView: View {
                     Label("Reveal in Finder", systemImage: "folder")
                 }
                 .buttonStyle(.borderless)
+                .subtleTextAction(help: "Reveal this folder in Finder")
                 Button {
                     copyAudioFolderPath(item.path)
                 } label: {
                     Label("Copy Path", systemImage: "doc.on.doc")
                 }
                 .buttonStyle(.borderless)
+                .subtleTextAction(help: "Copy this folder path")
             }
 
             Text(guidance.explanation)
@@ -1114,8 +1405,14 @@ struct ContentView: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
                 .padding(.top, 4)
+                .interactiveHover(isSelected: showOtherLargeApplications, tint: .teal)
+                .pointerCursor()
+                .help(showOtherLargeApplications ? "Hide other large applications" : "Show other large applications")
             }
         }
     }
@@ -1143,19 +1440,25 @@ struct ContentView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     HStack(spacing: 12) {
-                        Button("Select All") { selectAllDuplicates(r) }
-                            .buttonStyle(.borderless)
-                        Button("Deselect All") { deselectAllDuplicates() }
-                            .buttonStyle(.borderless)
-                        Spacer()
-                    }
+                    Button("Select All") { selectAllDuplicates(r) }
+                        .buttonStyle(.borderless)
+                        .subtleTextAction(help: "Select all duplicate files")
+                    Button("Deselect All") { deselectAllDuplicates() }
+                        .buttonStyle(.borderless)
+                        .subtleTextAction(help: "Clear duplicate file selection")
+                    Spacer()
+                }
 
                     if selectedCount > 0 {
                         HStack(spacing: 10) {
                             Button { moveSelectedToStaging() } label: {
-                                Label("Move to Staging", systemImage: "tray.and.arrow.down")
+                                Label(isMovingToStaging ? "Moving..." : "Move to Staging",
+                                      systemImage: isMovingToStaging ? "hourglass" : "tray.and.arrow.down")
                             }
                             .buttonStyle(.borderedProminent)
+                            .disabled(isMovingToStaging)
+                            .pointerCursor(!isMovingToStaging)
+                            .help("Move selected duplicate files to SessionSweep Staging")
 
                             Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
                                 .font(.caption)
@@ -1305,17 +1608,23 @@ struct ContentView: View {
                 HStack(spacing: 12) {
                     Button("Select All") { selectAllInstallers(stageable) }
                         .buttonStyle(.borderless)
+                        .subtleTextAction(help: "Select all stageable installers")
                     Button("Deselect All") { deselectAllInstallers() }
                         .buttonStyle(.borderless)
+                        .subtleTextAction(help: "Clear installer selection")
                     Spacer()
                 }
 
                 if selectedCount > 0 {
                     HStack(spacing: 10) {
                         Button { moveSelectedInstallersToStaging() } label: {
-                            Label("Move to Staging", systemImage: "tray.and.arrow.down")
+                            Label(isMovingInstallersToStaging ? "Moving..." : "Move to Staging",
+                                  systemImage: isMovingInstallersToStaging ? "hourglass" : "tray.and.arrow.down")
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(isMovingInstallersToStaging)
+                        .pointerCursor(!isMovingInstallersToStaging)
+                        .help("Move selected installers to SessionSweep Staging")
 
                         Text("\(selectedCount) file\(selectedCount == 1 ? "" : "s") selected · \(human(selectedBytes))")
                             .font(.caption)
@@ -1417,11 +1726,19 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button { restoreAllStaged() } label: {
-                        Label("Restore All", systemImage: "arrow.uturn.backward")
+                        Label(isRestoringAllStaged ? "Restoring..." : "Restore All",
+                              systemImage: isRestoringAllStaged ? "hourglass" : "arrow.uturn.backward")
                     }
+                    .disabled(isRestoringAllStaged || isClearingStaging)
+                    .pointerCursor(!isRestoringAllStaged && !isClearingStaging)
+                    .help("Restore every staged file to its original location")
                     Button(role: .destructive) { clearStaging() } label: {
-                        Label("Clear Staging", systemImage: "trash")
+                        Label(isClearingStaging ? "Clearing..." : "Clear Staging",
+                              systemImage: isClearingStaging ? "hourglass" : "trash")
                     }
+                    .disabled(isRestoringAllStaged || isClearingStaging)
+                    .pointerCursor(!isRestoringAllStaged && !isClearingStaging)
+                    .help("Permanently delete all files in SessionSweep Staging")
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -1453,8 +1770,10 @@ struct ContentView: View {
             Button { restore(file) } label: {
                 Label("Restore", systemImage: "arrow.uturn.backward")
             }
+            .pointerCursor()
+            .help("Restore this file to its original location")
         }
-        .padding(.vertical, 3)
+        .interactiveRow(isActive: false)
     }
 
     private func identicalRow(
@@ -1565,10 +1884,11 @@ struct ContentView: View {
                 Button("Copy Filename") { copyFilename(path) }
             } label: {
                 Image(systemName: "ellipsis.circle")
+                    .iconActionControl(help: "More actions")
             }
             .buttonStyle(.borderless)
             .menuStyle(.button)
-            .help("File actions")
+            .help("More actions")
         }
         .padding(.vertical, 2)
         .contextMenu {
@@ -1650,13 +1970,24 @@ struct ContentView: View {
                         Image(systemName: "chevron.right")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
-                    Button { storageExplorerRoute = crumb.route } label: {
+                    if idx == crumbs.count - 1 {
                         Text(crumb.title)
                             .font(.callout)
-                            .foregroundStyle(idx == crumbs.count - 1 ? .primary : .secondary)
-                            .fontWeight(idx == crumbs.count - 1 ? .semibold : .regular)
+                            .foregroundStyle(.primary)
+                            .fontWeight(.semibold)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                    } else {
+                        Button { storageExplorerRoute = crumb.route } label: {
+                            Text(crumb.title)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .fontWeight(.regular)
+                        }
+                        .buttonStyle(.plain)
+                        .subtleTextAction(help: "Go to \(crumb.title)")
+                        .accessibilityLabel("Go to \(crumb.title)")
                     }
-                    .buttonStyle(.plain)
                 }
             }
         }
@@ -1823,9 +2154,12 @@ struct ContentView: View {
                     .frame(width: 88, alignment: .trailing)
             }
             .contentShape(Rectangle())
+            .interactiveRow(isActive: drillable)
         }
         .buttonStyle(.plain)
         .disabled(!drillable)
+        .pointerCursor(drillable)
+        .help(drillable ? "Open \(node.title)" : "")
     }
 
     private func applicationResidualRow(_ residual: Int64, parentTotal: Int64) -> some View {
@@ -1924,9 +2258,12 @@ struct ContentView: View {
                 .frame(height: 7)
             }
             .contentShape(Rectangle())
+            .interactiveRow(isActive: drillable)
         }
         .buttonStyle(.plain)
         .disabled(!drillable)
+        .pointerCursor(drillable)
+        .help(drillable ? "Open \(node.title)" : "")
     }
 
     private func residualRow(
@@ -2847,10 +3184,12 @@ struct ContentView: View {
     }
 
     private func toggleAudioGuidance(for path: String) {
-        if expandedAudioGuidancePaths.contains(path) {
-            expandedAudioGuidancePaths.remove(path)
-        } else {
-            expandedAudioGuidancePaths.insert(path)
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if expandedAudioGuidancePaths.contains(path) {
+                expandedAudioGuidancePaths.remove(path)
+            } else {
+                expandedAudioGuidancePaths.insert(path)
+            }
         }
     }
 
@@ -2872,6 +3211,7 @@ struct ContentView: View {
     private func copyAudioFolderPath(_ path: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
+        showToast("Path copied")
     }
 
     @ViewBuilder
@@ -2904,7 +3244,10 @@ struct ContentView: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(protectedItem == nil ? Color.secondary : Color.teal)
+        .interactiveHover(isSelected: protectedItem != nil, cornerRadius: 7, tint: .teal)
+        .pointerCursor()
         .help(protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe")
+        .accessibilityLabel(protectedItem == nil ? "Keep Safe" : "Remove from Keep Safe")
     }
 
     @ViewBuilder
@@ -2948,6 +3291,7 @@ struct ContentView: View {
         )
         selectedDuplicatePaths = selectedDuplicatePaths.filter(isStageableDuplicatePath)
         selectedInstallerPaths = selectedInstallerPaths.filter(isStageableInstallerPath)
+        showToast("Added to Keep Safe")
     }
 
     private func removeKeepSafe(_ item: KeepSafeItem) {
@@ -2956,6 +3300,7 @@ struct ContentView: View {
         selectedDuplicatePaths.remove(item.resolvedPath)
         selectedInstallerPaths.remove(item.originalPath)
         selectedInstallerPaths.remove(item.resolvedPath)
+        showToast("Removed from Keep Safe")
     }
 
     private func revealKeepSafeItem(_ item: KeepSafeItem) {
@@ -3017,11 +3362,27 @@ struct ContentView: View {
     private func copyPath(_ path: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(path, forType: .string)
+        showToast("Path copied")
     }
 
     private func copyFilename(_ path: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(URL(fileURLWithPath: path).lastPathComponent, forType: .string)
+        showToast("Filename copied")
+    }
+
+    private func showToast(_ message: String) {
+        let toast = ActionToast(message: message)
+        actionToast = toast
+
+        Task {
+            try? await Task.sleep(nanoseconds: 1_700_000_000)
+            await MainActor.run {
+                if actionToast == toast {
+                    actionToast = nil
+                }
+            }
+        }
     }
 
     private func pathContext(_ path: String, sharedParent: String?) -> String {
@@ -3064,18 +3425,22 @@ struct ContentView: View {
         selectedDuplicatePaths = Set(r.duplicateGroups.flatMap { group in
             group.paths.filter(isStageableDuplicatePath)
         })
+        showToast("\(selectedDuplicatePaths.count) file\(selectedDuplicatePaths.count == 1 ? "" : "s") selected")
     }
 
     private func deselectAllDuplicates() {
         selectedDuplicatePaths.removeAll()
+        showToast("Selection cleared")
     }
 
     private func selectAllInstallers(_ items: [SizedItem]) {
         selectedInstallerPaths = Set(items.map(\.url.path).filter(isStageableInstallerPath))
+        showToast("\(selectedInstallerPaths.count) installer\(selectedInstallerPaths.count == 1 ? "" : "s") selected")
     }
 
     private func deselectAllInstallers() {
         selectedInstallerPaths.removeAll()
+        showToast("Selection cleared")
     }
 
     private func selectedDuplicateBytes(in result: ScanResult) -> Int64 {
@@ -3161,6 +3526,10 @@ struct ContentView: View {
 //            return
 //        }
 
+        guard !isMovingToStaging else { return }
+        isMovingToStaging = true
+        defer { isMovingToStaging = false }
+
         let paths = selectedDuplicatePaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
@@ -3187,6 +3556,7 @@ struct ContentView: View {
             applyMovedDuplicatePaths(movedOriginalPaths)
             selectedDuplicatePaths.subtract(movedOriginalPaths)
             refreshStaging()
+            showToast("\(movedOriginalPaths.count) file\(movedOriginalPaths.count == 1 ? "" : "s") moved to Staging")
         }
 
         if protectedSkippedCount > 0 {
@@ -3208,6 +3578,10 @@ struct ContentView: View {
     }
 
     private func moveSelectedInstallersToStaging() {
+        guard !isMovingInstallersToStaging else { return }
+        isMovingInstallersToStaging = true
+        defer { isMovingInstallersToStaging = false }
+
         let paths = selectedInstallerPaths.sorted()
         var movedOriginalPaths: Set<String> = []
         var skippedCount = 0
@@ -3232,6 +3606,7 @@ struct ContentView: View {
             applyMovedInstallerPaths(movedOriginalPaths)
             selectedInstallerPaths.subtract(movedOriginalPaths)
             refreshStaging()
+            showToast("\(movedOriginalPaths.count) installer\(movedOriginalPaths.count == 1 ? "" : "s") moved to Staging")
         }
 
         if protectedSkippedCount > 0 {
@@ -3259,12 +3634,18 @@ struct ContentView: View {
         do {
             try StagingManager.restore(file)
             refreshStaging()
+            showToast("File restored")
         } catch {
             appAlert = skippedRestoreAlert(count: 1)
         }
     }
 
     private func restoreAllStaged() {
+        guard !isRestoringAllStaged else { return }
+        isRestoringAllStaged = true
+        defer { isRestoringAllStaged = false }
+
+        let originalCount = stagedFiles.count
         var skippedCount = 0
         for file in stagedFiles {
             do {
@@ -3277,6 +3658,8 @@ struct ContentView: View {
 
         if skippedCount > 0 {
             appAlert = skippedRestoreAlert(count: skippedCount)
+        } else if originalCount > 0 {
+            showToast("\(originalCount) file\(originalCount == 1 ? "" : "s") restored")
         }
     }
 
@@ -3310,9 +3693,17 @@ struct ContentView: View {
     }
 
     private func clearStaging() {
+        guard !isClearingStaging else { return }
+        isClearingStaging = true
+        defer { isClearingStaging = false }
+
+        let originalCount = stagedFiles.count
         do {
             try StagingManager.clearStaging()
             refreshStaging()
+            if originalCount > 0 {
+                showToast("Staging cleared")
+            }
         } catch {
             appAlert = AppAlert(title: "Could Not Clear Staging", message: error.localizedDescription)
         }
