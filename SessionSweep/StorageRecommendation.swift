@@ -81,7 +81,7 @@ enum StorageRecommendationEngine {
             estimate: formatBytes(total),
             explanation: "Duplicate files and installers appear safe to stage for review. SessionSweep keeps this recoverable by moving files to Staging first.",
             confidence: "High Confidence",
-            actionTitle: "View Results",
+            actionTitle: "Review Files",
             destination: .safeCleanup
         )
     }
@@ -99,7 +99,7 @@ enum StorageRecommendationEngine {
             estimate: "Approximately \(formatBytes(total))",
             explanation: "Older project folders may be good archive candidates. SessionSweep cannot know whether a session is complete, so review before moving anything.",
             confidence: "Medium Confidence",
-            actionTitle: "View Results",
+            actionTitle: "Review Folders",
             destination: .archiveCandidates
         )
     }
@@ -127,7 +127,7 @@ enum StorageRecommendationEngine {
             estimate: "Approximately \(formatBytes(total))",
             explanation: "Some sample libraries appear to support relocation using official vendor tools or settings. Review vendor guidance before moving content.",
             confidence: "Review Recommended",
-            actionTitle: "View Results",
+            actionTitle: "Learn More",
             destination: .libraryRelocation
         )
     }
@@ -151,7 +151,7 @@ enum StorageRecommendationEngine {
             estimate: formatBytes(total),
             explanation: "Several large applications are using significant storage. This is shown for awareness only; SessionSweep does not recommend deleting apps automatically.",
             confidence: "Informational",
-            actionTitle: "View Results",
+            actionTitle: "View Applications",
             destination: .applications
         )
     }
@@ -176,7 +176,7 @@ enum StorageRecommendationEngine {
             estimate: "\(formatBytes(total)) protected infrastructure",
             explanation: "Plugin binaries and audio system folders appear essential to installed production software. No action is required.",
             confidence: nil,
-            actionTitle: "View Results",
+            actionTitle: "Why?",
             destination: .leaveInPlace
         )
     }

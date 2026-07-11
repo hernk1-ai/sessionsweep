@@ -603,10 +603,10 @@ struct ContentView: View {
                     }
                     .id(ResultSectionID.summary)
 
-                    storageRecommendationsSection(r, proxy: proxy)
-                        .id(ResultSectionID.recommendations)
                     card { categorySection(r) }
                         .id(ResultSectionID.categories)
+                    storageRecommendationsSection(r, proxy: proxy)
+                        .id(ResultSectionID.recommendations)
                     card { audioSystemDataSection(r) }
                         .id(ResultSectionID.audioSystemData)
                     card { keepSafeSection() }
@@ -653,9 +653,9 @@ struct ContentView: View {
         if !recommendations.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Storage Recommendations")
+                    Text("Recommended Next Steps")
                         .font(.headline)
-                    Text("Here’s what SessionSweep recommends based on this scan, ordered from safest to most review-dependent.")
+                    Text("SessionSweep found a few opportunities worth reviewing, ordered from the safest recommendations to items that deserve a closer look.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -778,7 +778,7 @@ struct ContentView: View {
         let rightCol = Array(cats.dropFirst(mid))
 
         return VStack(alignment: .leading, spacing: 14) {
-            Text("What's filling your drive").font(.headline)
+            Text("What's Filling Your Drive").font(.headline)
             GeometryReader { geo in
                 HStack(spacing: 1) {
                     ForEach(cats, id: \.0) { cat, size in
