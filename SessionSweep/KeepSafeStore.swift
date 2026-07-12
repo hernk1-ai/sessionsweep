@@ -42,7 +42,6 @@ final class KeepSafeStore: ObservableObject {
     @Published private(set) var items: [KeepSafeItem] = []
 
     private let fileURL: URL
-    private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
     init(fileURL: URL? = nil) {
@@ -55,7 +54,6 @@ final class KeepSafeStore: ObservableObject {
                 .appendingPathComponent("Library/Application Support/SessionSweep", isDirectory: true)
 
         self.fileURL = fileURL ?? supportDirectory.appendingPathComponent("KeepSafeItems.json")
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         load()
         refreshAvailability()
     }
@@ -141,6 +139,50 @@ final class KeepSafeStore: ObservableObject {
         }
     }
 
+    @MainActor
+    @discardableResult
+    func addPersistingInBackground(
+        path: String,
+        itemType: KeepSafeItemType? = nil,
+        size: Int64? = nil,
+        classification: String? = nil,
+        category: String? = nil,
+        note: String? = nil
+    ) async throws -> KeepSafeItem {
+        let preparedItem = await Task.detached(priority: .utility) {
+            Self.makePreparedItem(
+                path: path,
+                itemType: itemType,
+                size: size,
+                classification: classification,
+                category: category,
+                note: note
+            )
+        }.value
+
+        var updatedItems = items
+        let persistedItem: KeepSafeItem
+        if let index = indexOfItem(
+            in: updatedItems,
+            standardized: preparedItem.originalPath,
+            resolved: preparedItem.resolvedPath
+        ) {
+            updatedItems[index].lastSeenDate = Date()
+            updatedItems[index].lastKnownExists = preparedItem.lastKnownExists
+            updatedItems[index].classification = classification ?? updatedItems[index].classification
+            updatedItems[index].category = category ?? updatedItems[index].category
+            updatedItems[index].note = note ?? updatedItems[index].note
+            persistedItem = updatedItems[index]
+        } else {
+            updatedItems.append(preparedItem)
+            persistedItem = preparedItem
+        }
+
+        try await saveInBackground(updatedItems)
+        items = updatedItems
+        return persistedItem
+    }
+
     func remove(id: UUID) {
         do {
             try removePersisting(id: id)
@@ -161,6 +203,17 @@ final class KeepSafeStore: ObservableObject {
             items = previousItems
             throw error
         }
+    }
+
+    @MainActor
+    @discardableResult
+    func removePersistingInBackground(id: UUID) async throws -> KeepSafeItem? {
+        guard let item = items.first(where: { $0.id == id }) else { return nil }
+        var updatedItems = items
+        updatedItems.removeAll { $0.id == id }
+        try await saveInBackground(updatedItems)
+        items = updatedItems
+        return item
     }
 
     func remove(path: String) {
@@ -256,6 +309,19 @@ final class KeepSafeStore: ObservableObject {
         saveOrRollback(previousItems: previousItems)
     }
 
+    private func indexOfItem(
+        in items: [KeepSafeItem],
+        standardized: String,
+        resolved: String
+    ) -> Int? {
+        items.firstIndex { item in
+            pathsEqual(item.originalPath, standardized)
+                || pathsEqual(item.resolvedPath, standardized)
+                || pathsEqual(item.originalPath, resolved)
+                || pathsEqual(item.resolvedPath, resolved)
+        }
+    }
+
     private func matches(item: KeepSafeItem, candidate: String) -> Bool {
         let itemPaths = [item.originalPath, item.resolvedPath].map(standardize)
         let candidates = [candidate, resolve(candidate)].map(standardize)
@@ -279,15 +345,28 @@ final class KeepSafeStore: ObservableObject {
 
     private func save() throws {
         do {
-            try FileManager.default.createDirectory(
-                at: fileURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try encoder.encode(items)
-            try data.write(to: fileURL, options: .atomic)
+            try Self.write(items, to: fileURL)
         } catch {
             throw error
         }
+    }
+
+    private func saveInBackground(_ items: [KeepSafeItem]) async throws {
+        let fileURL = fileURL
+        try await Task.detached(priority: .utility) {
+            try Self.write(items, to: fileURL)
+        }.value
+    }
+
+    private nonisolated static func write(_ items: [KeepSafeItem], to fileURL: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try encoder.encode(items)
+        try data.write(to: fileURL, options: .atomic)
     }
 
     private func saveOrRollback(previousItems: [KeepSafeItem]) {
@@ -324,6 +403,70 @@ final class KeepSafeStore: ObservableObject {
     }
 
     private func makeBookmarkData(path: String) -> Data? {
+        try? URL(fileURLWithPath: path).bookmarkData(
+            options: [],
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+    }
+
+    private nonisolated static func makePreparedItem(
+        path: String,
+        itemType: KeepSafeItemType?,
+        size: Int64?,
+        classification: String?,
+        category: String?,
+        note: String?
+    ) -> KeepSafeItem {
+        let standardized = standardizedPath(path)
+        let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+        let url = URL(fileURLWithPath: standardized)
+        let exists = FileManager.default.fileExists(atPath: standardized)
+            || FileManager.default.fileExists(atPath: resolved)
+
+        return KeepSafeItem(
+            id: UUID(),
+            originalPath: standardized,
+            resolvedPath: resolved,
+            displayName: url.lastPathComponent.isEmpty ? standardized : url.lastPathComponent,
+            itemType: itemType ?? inferredItemTypeForPreparation(path: standardized),
+            sizeAtProtection: size ?? currentSizeForPreparation(path: standardized),
+            dateProtected: Date(),
+            lastSeenDate: exists ? Date() : nil,
+            lastKnownExists: exists,
+            sourceVolumeIdentifier: sourceVolumeIdentifierForPreparation(path: standardized),
+            bookmarkData: bookmarkDataForPreparation(path: standardized),
+            classification: classification,
+            category: category,
+            note: note
+        )
+    }
+
+    private nonisolated static func inferredItemTypeForPreparation(path: String) -> KeepSafeItemType {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+            return .folder
+        }
+        return .file
+    }
+
+    private nonisolated static func currentSizeForPreparation(path: String) -> Int64 {
+        let url = URL(fileURLWithPath: path)
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .totalFileAllocatedSizeKey, .isDirectoryKey])
+        if values?.isDirectory == true { return 0 }
+        return Int64(values?.totalFileAllocatedSize ?? values?.fileSize ?? 0)
+    }
+
+    private nonisolated static func sourceVolumeIdentifierForPreparation(path: String) -> String? {
+        let url = URL(fileURLWithPath: path)
+        let values = try? url.resourceValues(forKeys: [.volumeIdentifierKey, .volumeNameKey])
+        if let identifier = values?.volumeIdentifier {
+            return String(describing: identifier)
+        }
+        return values?.volumeName
+    }
+
+    private nonisolated static func bookmarkDataForPreparation(path: String) -> Data? {
         try? URL(fileURLWithPath: path).bookmarkData(
             options: [],
             includingResourceValuesForKeys: nil,
