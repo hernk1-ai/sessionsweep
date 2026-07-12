@@ -131,22 +131,27 @@ nonisolated struct ScanResult: Sendable {
     var installerFiles: [SizedItem] = []
 }
 
+private nonisolated enum FullDiskAccessPermission {
+    private static let tccDatabaseURL = URL(
+        fileURLWithPath: "/Library/Application Support/com.apple.TCC/TCC.db",
+        isDirectory: false
+    )
+
+    static func isEnabled() -> Bool {
+        canOpenForReading(tccDatabaseURL)
+    }
+
+    private static func canOpenForReading(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        try? handle.close()
+        return true
+    }
+}
+
 nonisolated enum Scanner {
     static let minDupSize: Int64 = 1_048_576
     static let browserMinSize: Int64 = 1_048_576
     private nonisolated static let topFilesLimit = 100
-    private nonisolated static let fullDiskAccessDirectoryProbeURLs = [
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Mail", isDirectory: true),
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Messages", isDirectory: true),
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Safari", isDirectory: true),
-    ]
-    private nonisolated static let fullDiskAccessFileProbeURLs = [
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/com.apple.TCC/TCC.db", isDirectory: false),
-    ]
 
     private static let bundleLikeExts: Set<String> = [
         "swiftmodule","framework","bundle","app","component","vst","vst3",
@@ -219,7 +224,7 @@ nonisolated enum Scanner {
         var seenDuplicateTargets: Set<String> = []
         let rootPath = root.standardizedFileURL.path
         result.rootPath = rootPath
-        result.isFullDiskAccessEnabled = hasFullDiskAccess()
+        result.isFullDiskAccessEnabled = FullDiskAccessPermission.isEnabled()
 
         func addToAncestors(of itemURL: URL, _ size: Int64) {
             var current = itemURL.deletingLastPathComponent().standardizedFileURL
@@ -440,25 +445,6 @@ nonisolated enum Scanner {
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func hasFullDiskAccess() -> Bool {
-        if fullDiskAccessDirectoryProbeURLs.contains(where: canReadDirectory) { return true }
-        return fullDiskAccessFileProbeURLs.contains(where: canReadFile)
-    }
-
-    private static func canReadDirectory(_ url: URL) -> Bool {
-        (try? FileManager.default.contentsOfDirectory(
-            at: url,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        )) != nil
-    }
-
-    private static func canReadFile(_ url: URL) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
-        try? handle.close()
-        return true
     }
 
     private static func insertTop(_ list: inout [SizedItem], item: SizedItem, limit: Int) {
