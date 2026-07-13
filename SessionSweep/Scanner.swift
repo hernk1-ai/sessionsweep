@@ -137,14 +137,30 @@ private nonisolated enum FullDiskAccessPermission {
         isDirectory: false
     )
 
-    static func isEnabled() -> Bool {
-        canOpenForReading(tccDatabaseURL)
+    static func isEnabled(scanEvidence result: ScanResult? = nil) -> Bool {
+        if canOpenForReading(tccDatabaseURL) { return true }
+        guard let result else { return false }
+        return scanShowsSystemAudioAccess(result)
     }
 
     private static func canOpenForReading(_ url: URL) -> Bool {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
         try? handle.close()
         return true
+    }
+
+    private static func scanShowsSystemAudioAccess(_ result: ScanResult) -> Bool {
+        result.audioSystemData.items.contains { item in
+            item.size > 0 && isSystemAudioAccessPath(item.path)
+        }
+    }
+
+    private static func isSystemAudioAccessPath(_ path: String) -> Bool {
+        let lowerPath = path.lowercased()
+        return lowerPath.hasPrefix("/library/audio/plug-ins")
+            || lowerPath.hasPrefix("/library/audio/presets")
+            || lowerPath.hasPrefix("/library/audio/impulse responses")
+            || lowerPath.hasPrefix("/library/application support/")
     }
 }
 
@@ -320,6 +336,7 @@ nonisolated enum Scanner {
         result.folderSizes = folderSizes
         result.folderChildren = children
         result.audioSystemData = AudioSystemDataClassifier.summarize(folderSizes: folderSizes)
+        result.isFullDiskAccessEnabled = FullDiskAccessPermission.isEnabled(scanEvidence: result)
 
         if cancel?.isCancelled != true {
             let (confident, identical) = findDuplicates(
